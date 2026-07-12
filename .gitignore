@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+*.egg-info/
+
+# Generated pipeline artifacts (Task 2.5: no results in the repo)
+cache/
+results/
+*.npz

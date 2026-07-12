@@ -1,0 +1,23 @@
+# Runtime + test dependencies. The Colab notebook pins the same set in its setup
+# cell. Versions below are lower bounds verified during development
+# (Python 3.11). chronos-forecasting 2.x is required for Chronos2Pipeline.embed().
+
+# --- core pipeline (needed for the CPU smoke tests) ---
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+scikit-learn>=1.3
+torch>=2.1
+
+# --- losses / baselines ---
+coral-pytorch>=1.4        # CORN ordinal loss (Shi, Cao & Raschka 2021)
+lightgbm>=4.0             # GBM baseline
+sktime>=1.0              # MiniRocketMultivariate
+numba>=0.59              # required by sktime's MiniRocket
+
+# --- foundation model (GPU; Stage A only) ---
+chronos-forecasting>=2.0.0   # official Chronos2Pipeline.embed()
+safetensors>=0.4
+
+# --- test ---
+pytest>=7.0
