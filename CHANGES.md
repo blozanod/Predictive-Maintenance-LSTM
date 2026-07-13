@@ -158,12 +158,30 @@ Stage A cache per `(context, pooling)` (idempotent) and checkpoints every row to
 literature-comparable metric). The notebook adopts the winner and reruns the full
 data-fraction × loss × seed sweep + baselines at it (`run_sweep`).
 
-**Winner (to be recorded after the Colab run).** _Not filled in here: the ablation
-requires the Chronos-2 GPU embedding pass, which does not run in the code-review
-environment. No result numbers are invented (Task 2.5 rigor rule). After running
-Stage A2 on the L4, record the winning cell and its seed-mean ± std clipped RMSE
-here, with the one-line justification (e.g. "context 120 + emb+locscale, mean
-pooling: −X.X RMSE vs emb-only; raw-fusion a further −Y.Y")._
+**Winner (recorded from the July 2026 Colab run, `ablation.csv`).**
+`tsfm_context_length=256, head_features=emb+locscale, pooling=mean`: clipped RMSE
+**10.81 ± 0.66** (3 seeds), vs 10.92 ± 0.14 for `forecast_token` at the same cell,
+11.06 ± 0.58 for `emb+locscale+raw`, and 13.18 ± 0.32 for the old context-30 cell.
+Context length dominates (16.4 → 13.2 emb-only from 30 → 60+; a further −1.2 from
+120 → 256 with locscale); locscale fusion is worth ~1–3 RMSE at every context.
+The full sweep at this winner (`results_v2.csv`) passes both sanity gates:
+full-data clipped RMSE 10.66 ± 0.51 (mse arm, 5 seeds).
+
+**Interpretation caveats on "context 256" (recorded, not yet acted on):**
+1. Contexts are truncated to available history and never padded (§10), so no data
+   is fabricated — but only 17/100 FD001 *train* units have ≥256 cycles (median
+   199) and 1/100 *test* units do (median 134). "256" therefore effectively means
+   "**all available history**"; the ablation grid is really {30, 60, 120, ~full}.
+   A finer grid (e.g. {80, 190=median, full}) would be needed to claim an optimum.
+2. With truncate-to-history contexts, context *length* correlates with elapsed
+   cycles, itself predictive of RUL. Part of the long-context gain may be the head
+   reading "engine age" out of the embedding — legitimate at deployment (age is
+   always known) but the baselines don't get an elapsed-cycles feature. Fairness
+   follow-ups: (a) run the plan §4 "linear regression on cycle count" floor,
+   (b) give GBM an elapsed-cycles feature, (c) run
+   `run_baseline_window_comparison` (implemented, §14) so baselines also get a
+   long-history variant. Until then, cross-model comparisons at context 256 favor
+   the TSFM's information set, not necessarily its representations.
 
 ## 13. On-GPU head training; embedding-pass cuDNN autotune (Task 2)
 `train.train_head` moves features/labels to the device once and minibatches with a
