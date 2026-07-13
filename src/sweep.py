@@ -382,3 +382,70 @@ def run_baseline_window_comparison(
                                                 te_y, pred, baseline_window=ws))
                 done.add((bname, str(ws), str(seed)))
     return out_csv
+
+
+# ---------------------------------------------------------------------------
+# Fairness arms: the engine-age floor + GBM-with-age (plan §4; CHANGES.md §19)
+# ---------------------------------------------------------------------------
+def run_fairness_baselines(
+    config: Config,
+    results_csv: Optional[str | Path] = None,
+    n_units_list: Optional[list[int]] = None,
+    seeds: Optional[list[int]] = None,
+) -> Path:
+    """Two arms that hand the baselines the ELAPSED-CYCLES signal the TSFM's
+    variable-length context implicitly carries (CHANGES.md §12 caveat 2):
+
+    * ``cycle_reg`` -- linear regression clipped-RUL ~ elapsed cycles, the plan §4
+      "linear regression on cycle count" floor. Quantifies how much skill is just
+      reading the engine's age.
+    * ``gbm_age``   -- the standard GBM whose windows carry ``time_cycles`` as an
+      extra leading channel, so ``window_statistics`` includes elapsed cycles
+      (last value), its slope, etc. If gbm_age closes the gap to the TSFM, the
+      long-context advantage was age, not representation.
+
+    Appends rows to the MAIN results CSV (default ``results_v2.csv``) over the
+    standard (n_units x seed) grid so the data-scaling plot picks them up.
+    Known caveat (as for all fixed-window baselines, §14): front-padding short
+    test units repeats the first cycle's ``time_cycles``; the LAST value -- the
+    true age at prediction time -- is always real. Restartable; CPU-only."""
+    results_csv = Path(results_csv) if results_csv else Path(config.results_dir) / "results_v2.csv"
+    seeds = seeds if seeds is not None else list(config.sweep_seeds)
+
+    df_train, df_test, rul = data_mod.load_cmapss(config)
+    df_train = data_mod.add_train_rul(df_train, config)
+    df_test = data_mod.add_test_rul(df_test, rul, config)
+    ws = config.window_size
+    age_cols = ["time_cycles"] + list(config.sensor_columns)
+    tr_w, tr_y, tr_u = data_mod.make_windows(df_train, age_cols, ws, target_col="clipped_rul")
+    te_w, te_y, te_u = data_mod.make_test_last_windows(
+        df_test, age_cols, ws, target_col="actual_rul", pad_short=config.pad_short_test_units)
+    tr_age, te_age = tr_w[:, -1, 0], te_w[:, -1, 0]   # elapsed cycles at prediction time
+
+    all_units = np.unique(tr_u)
+    n_units_list = n_units_list if n_units_list is not None else list(config.data_unit_counts)
+    done = completed_cells(results_csv, CELL_KEYS)
+
+    for n_units in n_units_list:
+        if n_units > len(all_units):
+            continue
+        for seed in seeds:
+            sampled = data_mod.subsample_units(all_units, n_units, seed)
+            train_u, val_u = data_mod.unit_train_val_split(sampled, config.val_fraction, seed)
+            tr_mask, va_mask = np.isin(tr_u, train_u), np.isin(tr_u, val_u)
+
+            if ("cycle_reg", str(n_units), str(seed), "native") not in done:
+                slope, intercept = np.polyfit(tr_age[tr_mask], tr_y[tr_mask], 1)
+                pred = np.clip(slope * te_age + intercept, 0.0, float(config.max_rul))
+                append_result_row(results_csv, _row(config, "cycle_reg", len(sampled), seed,
+                                                    "native", te_y, pred, baseline_window=ws))
+                done.add(("cycle_reg", str(n_units), str(seed), "native"))
+
+            if ("gbm_age", str(n_units), str(seed), "native") not in done:
+                bl = baselines_mod.make_baseline("gbm", config, seed=seed)
+                bl.fit(tr_w[tr_mask], tr_y[tr_mask], tr_w[va_mask], tr_y[va_mask])
+                pred = bl.predict(te_w)
+                append_result_row(results_csv, _row(config, "gbm_age", len(sampled), seed,
+                                                    "native", te_y, pred, baseline_window=ws))
+                done.add(("gbm_age", str(n_units), str(seed), "native"))
+    return results_csv

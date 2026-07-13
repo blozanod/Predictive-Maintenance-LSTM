@@ -21,28 +21,33 @@ import matplotlib.pyplot as plt
 
 from .evaluate import aggregate_data_scaling, load_learning_curve, load_results
 
-# Okabe-Ito, fixed assignment per model family (never cycled).
+# Okabe-Ito, fixed assignment per model family (never cycled). gbm_age shares
+# GBM's hue (same family, augmented features) but differs in marker + linestyle.
 _FAMILY_STYLE = {
     "chronos-2_mlp": dict(color="#0072B2", marker="o"),
     "gbm": dict(color="#E69F00", marker="s"),
+    "gbm_age": dict(color="#E69F00", marker="P", ls="--"),
     "lstm": dict(color="#009E73", marker="^"),
     "cnn": dict(color="#D55E00", marker="v"),
     "minirocket": dict(color="#CC79A7", marker="D"),
 }
 _FALLBACK_COLORS = ["#56B4E9", "#F0E442", "#000000"]
 _LOSS_LINESTYLE = {"mse": "-", "corn": "--", "quantile": ":", "native": "-", "": "-"}
-_FLOOR_MODEL = "predict_mean"
+# Floors are drawn as flat reference lines and excluded from y-limits.
+_FLOOR_STYLE = {"predict_mean": ("predict-mean floor", ":"),
+                "cycle_reg": ("cycle-age floor (linear)", "-.")}
 
 
 def _series_style(label: str) -> dict:
-    """Style for an ``aggregate_data_scaling`` label (``model`` or ``model[loss]``)."""
+    """Style for an ``aggregate_data_scaling`` label (``model`` or ``model[loss]``).
+    A family's own ``ls`` wins over the loss-derived linestyle."""
     m = re.fullmatch(r"(.+?)\[(.+)\]", label)
     family, loss = (m.group(1), m.group(2)) if m else (label, "native")
     style = _FAMILY_STYLE.get(family)
     if style is None:  # unknown family: deterministic fallback, no cycling
         idx = sum(family.encode()) % len(_FALLBACK_COLORS)
         style = dict(color=_FALLBACK_COLORS[idx], marker="x")
-    return dict(style, ls=_LOSS_LINESTYLE.get(loss, "-"))
+    return dict({"ls": _LOSS_LINESTYLE.get(loss, "-")}, **style)
 
 
 def _save(fig, out_dir: Path, name: str) -> list[Path]:
@@ -90,9 +95,11 @@ def plot_data_scaling(
         for label in sorted(agg):
             ns, mean, std = agg[label]
             all_ns.update(int(n) for n in ns)
-            if label.startswith(_FLOOR_MODEL):
-                ax.axhline(float(np.mean(mean)), color="#888888", ls=":", lw=1.2,
-                           label="predict-mean floor")
+            family = label.split("[")[0]
+            if family in _FLOOR_STYLE:
+                floor_label, floor_ls = _FLOOR_STYLE[family]
+                ax.axhline(float(np.mean(mean)), color="#888888", ls=floor_ls,
+                           lw=1.2, label=floor_label)
                 continue
             st = _series_style(label)
             ax.plot(ns, mean, lw=2, ms=5, label=label, **st)
@@ -186,15 +193,18 @@ def plot_horizon(
     show: bool = True,
 ) -> list[Path]:
     """Horizon-stratified error: MAE and bias vs. true-RUL bin, one figure per
-    training-unit count. The right-most bin (true RUL >= max_rul) is shaded: with
-    clipped training labels it measures saturation quality, not long-horizon skill
-    (src/horizon.py docstring)."""
+    (label cap, training-unit count) arm -- the cap arms (CHANGES.md §18) get
+    separate figures because their bins differ. The right-most bin (true RUL >=
+    max_rul) is shaded: with clipped training labels it measures saturation
+    quality, not long-horizon skill (src/horizon.py docstring)."""
     out_dir = Path(out_dir)
     rows = load_results(horizon_csv)
     rows = [r for r in rows if str(r.get("bin_lo")) != "all"]
     saved: list[Path] = []
-    for n_units in sorted({r["n_units"] for r in rows}):
-        sub = [r for r in rows if r["n_units"] == n_units]
+    arms = sorted({(int(float(r["max_rul"])), r["n_units"]) for r in rows})
+    for max_rul, n_units in arms:
+        sub = [r for r in rows
+               if r["n_units"] == n_units and int(float(r["max_rul"])) == max_rul]
         bins = sorted({(float(r["bin_lo"]),
                         float("inf") if str(r["bin_hi"]) == "inf" else float(r["bin_hi"]))
                        for r in sub})
@@ -234,8 +244,9 @@ def plot_horizon(
             ax.grid(alpha=0.25)
         ax_bias.axhline(0, color="#444444", lw=1)
         ax_mae.legend(fontsize=8, framealpha=0.9)
-        fig.suptitle(f"Error vs. prediction horizon (trained on {n_units} units)")
-        saved += _save(fig, out_dir, f"horizon_n{n_units}")
+        fig.suptitle(f"Error vs. prediction horizon "
+                     f"(trained on {n_units} units, label cap {max_rul})")
+        saved += _save(fig, out_dir, f"horizon_mr{max_rul}_n{n_units}")
         plt.show() if show else plt.close(fig)
     return saved
 
@@ -252,7 +263,8 @@ def plot_horizon_trajectories(
 ) -> list[Path]:
     """Predicted vs. true RUL along a few test-unit trajectories (the qualitative
     view of far-end behavior: does the prediction track the truth or flatline?).
-    Pass ``max_rul`` to draw the label cap -- predictions cannot exceed it, so
+    ``max_rul`` selects the cap arm when the predictions file carries several
+    (CHANGES.md §18) and draws the cap line -- predictions cannot exceed it, so
     against the UNCLIPPED truth line everything above the cap is unreachable."""
     import csv as _csv
     out_dir = Path(out_dir)
@@ -260,9 +272,18 @@ def plot_horizon_trajectories(
     with open(preds_csv, newline="") as f:
         for r in _csv.DictReader(f):
             rows.append({"model": r["model"], "loss": r["loss"],
+                         "max_rul": float(r["max_rul"]) if r.get("max_rul") else None,
                          "n_units": int(r["n_units"]), "seed": int(r["seed"]),
                          "unit": int(r["unit"]), "true": float(r["true_rul"]),
                          "pred": float(r["pred"])})
+    caps = sorted({r["max_rul"] for r in rows if r["max_rul"] is not None})
+    if max_rul is not None and caps:
+        rows = [r for r in rows if r["max_rul"] == float(max_rul)]
+        if not rows:
+            raise ValueError(f"no rows with max_rul={max_rul}; file has caps {caps}")
+    elif len(caps) > 1:
+        raise ValueError(f"predictions file mixes label caps {caps}; pass max_rul= "
+                         f"to select one arm")
     if n_units is None:
         n_units = max(r["n_units"] for r in rows)
     rows = [r for r in rows if r["n_units"] == n_units and r["seed"] == seed]
@@ -303,7 +324,8 @@ def plot_horizon_trajectories(
     axes[0][0].set_ylabel("RUL (cycles)")
     axes[0][0].legend(fontsize=8, framealpha=0.9)
     fig.suptitle(f"Prediction trajectories (trained on {n_units} units, seed {seed})")
-    saved = _save(fig, out_dir, f"horizon_trajectories_n{n_units}_seed{seed}")
+    cap_tag = f"_mr{int(max_rul)}" if max_rul is not None else ""
+    saved = _save(fig, out_dir, f"horizon_trajectories{cap_tag}_n{n_units}_seed{seed}")
     plt.show() if show else plt.close(fig)
     return saved
 

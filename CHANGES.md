@@ -254,6 +254,50 @@ target). Decisions:
 - **shots ≥ 2 enforced** (k=1 leaves no unit for the val split); the k-unit
   train/val split reuses `unit_train_val_split` exactly as the main sweep does.
 
+## 18. Horizon follow-ups: 5 seeds, paired test, raised label cap (a-b)
+- **Seeds.** `run_horizon_eval` now defaults to the FULL `sweep_seeds` (5, plan §6)
+  instead of the first 3: the per-bin CORN-vs-MSE comparison became a headline
+  claim and needs the seeds. Existing 3-seed rows stay valid (restartable cells).
+- **Paired significance.** `evaluate.paired_seed_ttest` runs a paired-by-seed
+  t-test per (max_rul, n_units, bin) cell. Pairing on seed is valid because both
+  loss arms share each seed's sampled units and split. Zero-variance differences
+  return nan rather than ±inf. With 5 seeds the test is low-powered — p-values are
+  reported as descriptive support next to the per-bin means, never alone.
+- **Raised label cap (the real long-horizon experiment).** The 125-cap runs are
+  KEPT untouched (literature comparability). A second arm at `max_rul=200` is run
+  afterwards: it re-keys both caches (labels are cached with the windows ⇒ a fresh
+  Stage A pass) and shares `horizon.csv`/`horizon_predictions.csv` with the 125
+  arm — `max_rul` joined `HORIZON_KEYS` and the predictions schema (new column).
+  Bin edges are now `default_bin_edges(max_rul)` (25-cycle bins to the cap, then
+  the ≥cap saturation bin), so edges BELOW 125 are identical across arms and
+  directly comparable; the 125–200 bins exist only in the 200 arm and measure
+  whether degradation is detectable that early at all.
+- **Schema guard.** `evaluate.ensure_csv_schema` fails loudly when appending
+  changed-schema rows to an old CSV (silent column misalignment otherwise). A
+  pre-§18 `horizon_predictions.csv` (no `max_rul` column) must be moved/archived;
+  `horizon.csv` is unchanged and keeps working.
+
+## 19. Fairness arms: cycle-age floor + GBM-with-age (c)
+`sweep.run_fairness_baselines` adds the two arms that bound the §12-caveat-2
+age confound (the TSFM's variable-length context implicitly carries engine age;
+baselines were never given it):
+- `cycle_reg` — linear regression clipped-RUL ~ elapsed cycles (the plan §4
+  "linear regression on cycle count" floor), fit per (n_units, seed) cell on the
+  cell's train-split rows, predictions clipped to [0, max_rul]. Drawn as a floor
+  reference line in the data-scaling figure.
+- `gbm_age` — the UNMODIFIED GBM baseline whose windows are built with
+  `time_cycles` as an extra leading channel, so `window_statistics` includes
+  elapsed cycles (last value of that channel), its slope, etc. No new model code;
+  the age signal enters through the standard feature path. Same known caveat as
+  all fixed-window baselines (§14): front-padded short test units repeat the
+  first cycle's `time_cycles`, but the LAST value (the true age at prediction
+  time) is always real.
+Rows append to the main `results_v2.csv` over the standard grid, so the
+data-scaling figure includes them automatically. If `gbm_age` closes most of the
+gap to the TSFM, the long-context advantage was age, not representation — that is
+the honest test the caveat demanded. `run_baseline_window_comparison` (§14) is
+now wired into the notebook (§4b) at windows {30, 60, 120}.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 FD002–FD004 & N-CMAPSS/bearings; TimesFM/MOMENT/TTM/Moirai (the `model_name`
 string + `Embedder` protocol are the slot-in points); condition-wise normalization

@@ -40,11 +40,25 @@ from . import baselines as baselines_mod
 from .features import HeadFeatureBuilder, raw_last_cycle
 from .evaluate import (
     rmse, mae, nasa_score, append_result_row, completed_cells, save_run_metadata,
-    RESULTS_SCHEMA_VERSION,
+    ensure_csv_schema, RESULTS_SCHEMA_VERSION,
 )
 
-HORIZON_KEYS = ["model", "n_units", "seed", "loss"]
+# max_rul is a cell key so the label-cap arms (e.g. 125 vs 200, CHANGES.md §18)
+# can share one horizon.csv without colliding on restart.
+HORIZON_KEYS = ["model", "max_rul", "n_units", "seed", "loss"]
 DEFAULT_BIN_EDGES = (0.0, 25.0, 50.0, 75.0, 100.0, 125.0, float("inf"))
+
+
+def default_bin_edges(max_rul: float, width: float = 25.0) -> tuple[float, ...]:
+    """``width``-cycle bins from 0 up to ``max_rul``, then a single >= max_rul
+    saturation bin. For max_rul=125 this reproduces DEFAULT_BIN_EDGES; for 200 it
+    extends to {...125-150, 150-175, 175-200, >=200} so the two cap arms share
+    identical edges below 125 (directly comparable) and the 200 arm adds the
+    genuinely-long horizons."""
+    edges = [float(e) for e in np.arange(0.0, float(max_rul) + 1e-9, float(width))]
+    if edges[-1] < float(max_rul):
+        edges.append(float(max_rul))
+    return tuple(edges) + (float("inf"),)
 
 
 def horizon_cache_path(config: Config) -> Path:
@@ -158,7 +172,7 @@ def run_horizon_eval(
     seeds: Optional[list[int]] = None,
     losses: Optional[list[str]] = None,
     baseline_names: Optional[list[str]] = None,
-    bin_edges: Sequence[float] = DEFAULT_BIN_EDGES,
+    bin_edges: Optional[Sequence[float]] = None,
     device: str = "cpu",
     out_csv: Optional[str | Path] = None,
     preds_csv: Optional[str | Path] = None,
@@ -166,7 +180,9 @@ def run_horizon_eval(
     """Train (TSFM head per loss + baselines) at each unit count x seed on the
     STANDARD train cache, predict EVERY test cycle, and append per-RUL-bin metric
     rows to ``horizon.csv`` + per-cycle predictions to ``horizon_predictions.csv``.
-    Restartable: completed (model, n_units, seed, loss) cells are skipped."""
+    ``bin_edges`` default to ``default_bin_edges(config.max_rul)`` so a raised
+    label cap automatically gets the extra long-horizon bins. Restartable:
+    completed (model, max_rul, n_units, seed, loss) cells are skipped."""
     import torch
     from .embeddings import load_embedding_cache
     from .sweep import _to_device_cache
@@ -181,10 +197,24 @@ def run_horizon_eval(
     run_dir.mkdir(parents=True, exist_ok=True)
     save_run_metadata(config, run_dir / "run_metadata.json")
 
-    seeds = seeds if seeds is not None else config.sweep_seeds[:3]
+    # Full seed set by default (>=5, plan §6): the per-bin CORN-vs-MSE comparison
+    # is a headline claim and the paired test needs the seeds (CHANGES.md §18).
+    seeds = seeds if seeds is not None else list(config.sweep_seeds)
     losses = losses if losses is not None else list(config.losses)
     baseline_names = baseline_names if baseline_names is not None else ["gbm", "lstm"]
+    bin_edges = tuple(bin_edges) if bin_edges is not None else default_bin_edges(config.max_rul)
     model_tag = config.model_name.split("/")[-1] + "_mlp"
+
+    # Appending a changed schema to an old CSV would silently misalign columns --
+    # fail loudly instead (the preds schema gained max_rul; archive old files).
+    _metric_fields = ["bin_lo", "bin_hi", "n_bin", "rmse_clipped", "mae_clipped",
+                      "bias", "nasa_mean"]
+    ensure_csv_schema(out_csv, [
+        "schema_version", "model", "n_units", "seed", "loss", "dataset", "max_rul",
+        "window_size", "tsfm_context_length", "head_features", "pooling",
+        *_metric_fields])
+    ensure_csv_schema(preds_csv, ["model", "max_rul", "n_units", "seed", "loss",
+                                  "unit", "true_rul", "pred"])
 
     dc = _to_device_cache(cache, device)     # train side on device
     t = lambda a: torch.as_tensor(np.asarray(a, np.float32), device=device)
@@ -210,7 +240,8 @@ def run_horizon_eval(
             })
         for unit, yt, yp in zip(h_u, h_y, pred):
             append_result_row(preds_csv, {
-                "model": model_name, "n_units": int(n_units), "seed": int(seed),
+                "model": model_name, "max_rul": config.max_rul,
+                "n_units": int(n_units), "seed": int(seed),
                 "loss": loss, "unit": int(unit),
                 "true_rul": float(yt), "pred": float(yp)})
 
@@ -230,23 +261,25 @@ def run_horizon_eval(
             Xva = builder.transform(dc["tr_emb"][va_i], dc["tr_ls"][va_i], dc["tr_raw"][va_i])
             Xh = builder.transform(h_emb, h_ls, h_raw)
             for loss in losses:
-                if (model_tag, str(n_units), str(seed), loss) in done:
+                key = (model_tag, str(config.max_rul), str(n_units), str(seed), loss)
+                if key in done:
                     continue
                 model, _ = train_mod.train_head(
                     Xtr, dc["tr_y"][tr_i], Xva, dc["tr_y"][va_i], loss, config,
                     seed=seed, device=device)
                 pred = train_mod.predict_head(model, Xh, loss, config, device=device)
                 _emit(model_tag, n_units, seed, loss, pred)
-                done.add((model_tag, str(n_units), str(seed), loss))
+                done.add(key)
 
             # ---- baselines on the fixed windows (window_size only) ----
             tr_w, tr_y = cache["train_windows"], cache["train_labels"]
             for bname in baseline_names:
-                if (bname, str(n_units), str(seed), "native") in done:
+                key = (bname, str(config.max_rul), str(n_units), str(seed), "native")
+                if key in done:
                     continue
                 bl = baselines_mod.make_baseline(bname, config, seed=seed)
                 bl.fit(tr_w[tr_mask], tr_y[tr_mask], tr_w[va_mask], tr_y[va_mask])
                 pred = bl.predict(hcache["test_windows"])
                 _emit(bname, n_units, seed, "native", pred)
-                done.add((bname, str(n_units), str(seed), "native"))
+                done.add(key)
     return out_csv
