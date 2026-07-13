@@ -211,6 +211,49 @@ pre-existing `results.csv` is archived to `results_v1.csv` before v2 writing beg
 (`evaluate.archive_results_v1`, idempotent). Row keys are emitted in a fixed order so
 the CSV columns stay aligned across TSFM and baseline rows.
 
+## 16. Horizon-stratified evaluation (src/horizon.py)
+The standard C-MAPSS protocol scores ONE prediction per test unit (final observed
+cycle), which cannot answer "how good are far-from-failure predictions?" — the ones
+that buy planning lead time. `build_horizon_cache` embeds EVERY test cycle
+≥ `window_size` (the training-row context construction applied to test trajectories)
+into a sidecar cache `horizon_<embedding_cache_key>.npz` — same key, so it
+invalidates with the main cache but never touches it. `run_horizon_eval` trains the
+standard arms at chosen unit counts and writes per-RUL-bin metrics (`horizon.csv`,
+default bins {0–25, 25–50, 50–75, 75–100, 100–125, ≥125}) + per-cycle predictions
+(`horizon_predictions.csv` for trajectory plots). Metrics per bin: RMSE/MAE vs the
+clipped target, `bias` = mean(pred − clipped truth) (negative ⇒ conservative/early),
+and `nasa_mean` (per-cycle mean PHM08 score; the raw sum is not comparable across
+bins of different size).
+
+**Protocol honesty:** (1) the ≥125 bin measures SATURATION quality only — with
+training labels clipped at `max_rul`, no model here can express "fails in 180
+cycles"; claims about horizons beyond 125 are impossible under this protocol.
+(2) Raising `max_rul` is the real long-horizon experiment; it re-keys both caches
+(labels are stored with the windows) and costs a fresh Stage A pass per value —
+deliberate follow-up, not done silently. (3) Test units shorter than `window_size`
+contribute no rows (none in FD001).
+
+## 17. Cold-start transfer evaluation (src/transfer.py)
+`run_transfer_eval` answers the day-one deployment question: head trained on a
+SOURCE fleet, evaluated on a TARGET fleet's standard test protocol with 0..k target
+failures. Arms (`transfer.csv` column `mode`): `zero_shot` (all source units, no
+target data), `target_only` (k target units), `source+target` (all source + k
+target). Decisions:
+- **Statistics travel with the training rows.** The head-feature standardizer
+  (loc/scale, raw-last) is fit on each arm's train rows only — source rows for
+  zero-shot, so the target is scored under source statistics exactly as a day-one
+  deployment would be. The TSFM path needs no other scaler (Chronos-2 instance-norm,
+  §2); GBM's window-statistic features are likewise scaler-free.
+- **From-scratch NN baselines (CNN/LSTM) are excluded by default** — they would
+  need a cross-dataset scaler policy (fit-on-source vs fit-on-target is itself a
+  research choice); add deliberately, not silently. Default baseline: GBM.
+- **FD001↔FD003 is the default pair**, a-priori valid: both single-operating-
+  condition with the same non-constant sensor set (§3). FD002/FD004 print a loud
+  warning: condition-wise normalization (plan §6) is not implemented, so those
+  numbers are exploratory only.
+- **shots ≥ 2 enforced** (k=1 leaves no unit for the val split); the k-unit
+  train/val split reuses `unit_train_val_split` exactly as the main sweep does.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 FD002–FD004 & N-CMAPSS/bearings; TimesFM/MOMENT/TTM/Moirai (the `model_name`
 string + `Embedder` protocol are the slot-in points); condition-wise normalization
