@@ -158,12 +158,30 @@ Stage A cache per `(context, pooling)` (idempotent) and checkpoints every row to
 literature-comparable metric). The notebook adopts the winner and reruns the full
 data-fraction × loss × seed sweep + baselines at it (`run_sweep`).
 
-**Winner (to be recorded after the Colab run).** _Not filled in here: the ablation
-requires the Chronos-2 GPU embedding pass, which does not run in the code-review
-environment. No result numbers are invented (Task 2.5 rigor rule). After running
-Stage A2 on the L4, record the winning cell and its seed-mean ± std clipped RMSE
-here, with the one-line justification (e.g. "context 120 + emb+locscale, mean
-pooling: −X.X RMSE vs emb-only; raw-fusion a further −Y.Y")._
+**Winner (recorded from the July 2026 Colab run, `ablation.csv`).**
+`tsfm_context_length=256, head_features=emb+locscale, pooling=mean`: clipped RMSE
+**10.81 ± 0.66** (3 seeds), vs 10.92 ± 0.14 for `forecast_token` at the same cell,
+11.06 ± 0.58 for `emb+locscale+raw`, and 13.18 ± 0.32 for the old context-30 cell.
+Context length dominates (16.4 → 13.2 emb-only from 30 → 60+; a further −1.2 from
+120 → 256 with locscale); locscale fusion is worth ~1–3 RMSE at every context.
+The full sweep at this winner (`results_v2.csv`) passes both sanity gates:
+full-data clipped RMSE 10.66 ± 0.51 (mse arm, 5 seeds).
+
+**Interpretation caveats on "context 256" (recorded, not yet acted on):**
+1. Contexts are truncated to available history and never padded (§10), so no data
+   is fabricated — but only 17/100 FD001 *train* units have ≥256 cycles (median
+   199) and 1/100 *test* units do (median 134). "256" therefore effectively means
+   "**all available history**"; the ablation grid is really {30, 60, 120, ~full}.
+   A finer grid (e.g. {80, 190=median, full}) would be needed to claim an optimum.
+2. With truncate-to-history contexts, context *length* correlates with elapsed
+   cycles, itself predictive of RUL. Part of the long-context gain may be the head
+   reading "engine age" out of the embedding — legitimate at deployment (age is
+   always known) but the baselines don't get an elapsed-cycles feature. Fairness
+   follow-ups: (a) run the plan §4 "linear regression on cycle count" floor,
+   (b) give GBM an elapsed-cycles feature, (c) run
+   `run_baseline_window_comparison` (implemented, §14) so baselines also get a
+   long-history variant. Until then, cross-model comparisons at context 256 favor
+   the TSFM's information set, not necessarily its representations.
 
 ## 13. On-GPU head training; embedding-pass cuDNN autotune (Task 2)
 `train.train_head` moves features/labels to the device once and minibatches with a
@@ -192,6 +210,49 @@ The sweep writes `results_v2.csv` (default) with a `schema_version` column
 pre-existing `results.csv` is archived to `results_v1.csv` before v2 writing begins
 (`evaluate.archive_results_v1`, idempotent). Row keys are emitted in a fixed order so
 the CSV columns stay aligned across TSFM and baseline rows.
+
+## 16. Horizon-stratified evaluation (src/horizon.py)
+The standard C-MAPSS protocol scores ONE prediction per test unit (final observed
+cycle), which cannot answer "how good are far-from-failure predictions?" — the ones
+that buy planning lead time. `build_horizon_cache` embeds EVERY test cycle
+≥ `window_size` (the training-row context construction applied to test trajectories)
+into a sidecar cache `horizon_<embedding_cache_key>.npz` — same key, so it
+invalidates with the main cache but never touches it. `run_horizon_eval` trains the
+standard arms at chosen unit counts and writes per-RUL-bin metrics (`horizon.csv`,
+default bins {0–25, 25–50, 50–75, 75–100, 100–125, ≥125}) + per-cycle predictions
+(`horizon_predictions.csv` for trajectory plots). Metrics per bin: RMSE/MAE vs the
+clipped target, `bias` = mean(pred − clipped truth) (negative ⇒ conservative/early),
+and `nasa_mean` (per-cycle mean PHM08 score; the raw sum is not comparable across
+bins of different size).
+
+**Protocol honesty:** (1) the ≥125 bin measures SATURATION quality only — with
+training labels clipped at `max_rul`, no model here can express "fails in 180
+cycles"; claims about horizons beyond 125 are impossible under this protocol.
+(2) Raising `max_rul` is the real long-horizon experiment; it re-keys both caches
+(labels are stored with the windows) and costs a fresh Stage A pass per value —
+deliberate follow-up, not done silently. (3) Test units shorter than `window_size`
+contribute no rows (none in FD001).
+
+## 17. Cold-start transfer evaluation (src/transfer.py)
+`run_transfer_eval` answers the day-one deployment question: head trained on a
+SOURCE fleet, evaluated on a TARGET fleet's standard test protocol with 0..k target
+failures. Arms (`transfer.csv` column `mode`): `zero_shot` (all source units, no
+target data), `target_only` (k target units), `source+target` (all source + k
+target). Decisions:
+- **Statistics travel with the training rows.** The head-feature standardizer
+  (loc/scale, raw-last) is fit on each arm's train rows only — source rows for
+  zero-shot, so the target is scored under source statistics exactly as a day-one
+  deployment would be. The TSFM path needs no other scaler (Chronos-2 instance-norm,
+  §2); GBM's window-statistic features are likewise scaler-free.
+- **From-scratch NN baselines (CNN/LSTM) are excluded by default** — they would
+  need a cross-dataset scaler policy (fit-on-source vs fit-on-target is itself a
+  research choice); add deliberately, not silently. Default baseline: GBM.
+- **FD001↔FD003 is the default pair**, a-priori valid: both single-operating-
+  condition with the same non-constant sensor set (§3). FD002/FD004 print a loud
+  warning: condition-wise normalization (plan §6) is not implemented, so those
+  numbers are exploratory only.
+- **shots ≥ 2 enforced** (k=1 leaves no unit for the val split); the k-unit
+  train/val split reuses `unit_train_val_split` exactly as the main sweep does.
 
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 FD002–FD004 & N-CMAPSS/bearings; TimesFM/MOMENT/TTM/Moirai (the `model_name`
