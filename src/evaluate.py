@@ -15,13 +15,25 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
 from .config import Config
+
+# Results-file schema version (distinct from the cache schema). v2 = both-protocol
+# metric columns (clipped + unclipped) + ablation axes (Task 1.4).
+RESULTS_SCHEMA_VERSION = 2
+
+# Numeric metric columns written per row (both protocols, Task 1.4).
+METRIC_FIELDS = (
+    "rmse_clipped", "mae_clipped", "nasa_clipped",
+    "rmse_unclipped", "mae_unclipped", "nasa_unclipped",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,12 +59,26 @@ def nasa_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.sum(s))
 
 
-def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray,
+                         max_rul: float) -> dict:
+    """Compute BOTH test-label protocols (Task 1.4) from the UNCLIPPED truth.
+
+    * ``*_clipped``   -- ground-truth RUL clipped at ``max_rul`` (predictions are
+                         already in [0, max_rul]); the literature-comparable numbers.
+    * ``*_unclipped`` -- against the raw RUL_FDxxx.txt target; inflated by the 11/100
+                         FD001 units with true RUL > 125 the head cannot reach.
+    """
+    y_true = np.asarray(y_true, np.float64)
+    y_pred = np.asarray(y_pred, np.float64)
+    y_clip = np.clip(y_true, None, float(max_rul))
     return {
-        "rmse": rmse(y_true, y_pred),
-        "mae": mae(y_true, y_pred),
-        "nasa_score": nasa_score(y_true, y_pred),
-        "n": int(len(np.asarray(y_true))),
+        "rmse_clipped": rmse(y_clip, y_pred),
+        "mae_clipped": mae(y_clip, y_pred),
+        "nasa_clipped": nasa_score(y_clip, y_pred),
+        "rmse_unclipped": rmse(y_true, y_pred),
+        "mae_unclipped": mae(y_true, y_pred),
+        "nasa_unclipped": nasa_score(y_true, y_pred),
+        "n": int(len(y_true)),
     }
 
 
@@ -121,13 +147,15 @@ def load_results(csv_path: str | Path) -> list[dict]:
     csv_path = Path(csv_path)
     if not csv_path.exists():
         return []
+    int_fields = ("n_units", "seed", "tsfm_context_length", "schema_version", "n")
+    float_fields = METRIC_FIELDS + ("rmse", "mae", "nasa_score")  # + legacy v1 names
     rows = []
     with open(csv_path, newline="") as f:
         for r in csv.DictReader(f):
-            for k in ("n_units", "seed"):
+            for k in int_fields:
                 if r.get(k) not in (None, ""):
-                    r[k] = int(r[k])
-            for k in ("rmse", "mae", "nasa_score"):
+                    r[k] = int(float(r[k]))
+            for k in float_fields:
                 if r.get(k) not in (None, ""):
                     r[k] = float(r[k])
             rows.append(r)
@@ -135,11 +163,12 @@ def load_results(csv_path: str | Path) -> list[dict]:
 
 
 def aggregate_data_scaling(
-    csv_path: str | Path, metric: str = "rmse"
+    csv_path: str | Path, metric: str = "rmse_clipped"
 ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Aggregate the data-scaling curve: for each (model, loss) series return
     (unit_counts, mean, std) of ``metric`` over seeds -- the headline figure with
-    error bands (RESEARCH_PLAN sec.6). Keeps NO logic in the notebook."""
+    error bands (RESEARCH_PLAN sec.6). Keeps NO logic in the notebook. ``metric``
+    defaults to the literature-comparable clipped RMSE (Task 1.4)."""
     rows = load_results(csv_path)
     series: dict[str, dict[int, list[float]]] = {}
     for r in rows:
@@ -152,6 +181,20 @@ def aggregate_data_scaling(
         std = np.array([np.std(by_n[n]) for n in ns])
         out[label] = (ns, mean, std)
     return out
+
+
+def archive_results_v1(results_dir: str | Path) -> Optional[Path]:
+    """Preserve a pre-existing ``results.csv`` as ``results_v1.csv`` before the
+    v2 schema starts writing ``results_v2.csv`` (Task 1.4 -- never overwrite v1).
+    Idempotent; returns the archive path if it created/kept one, else None.
+    """
+    results_dir = Path(results_dir)
+    legacy = results_dir / "results.csv"
+    archive = results_dir / "results_v1.csv"
+    if legacy.exists() and not archive.exists():
+        shutil.copy2(legacy, archive)
+        return archive
+    return archive if archive.exists() else None
 
 
 def load_learning_curve(curve_csv: str | Path) -> dict[str, tuple[list, list]]:

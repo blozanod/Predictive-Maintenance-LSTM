@@ -72,11 +72,14 @@ def _write(path: Path, arr: np.ndarray) -> None:
 
 
 class MockEmbedder:
-    """Deterministic fixed random-projection stand-in for ``ChronosEmbedder``.
+    """Deterministic random-projection stand-in for ``ChronosEmbedder``.
 
-    Same interface (``embed_windows`` / ``describe``), CPU-only, no downloads.
-    Counts calls so tests can assert Stage A idempotency and that sweeps never
-    re-embed.
+    Same interface (``embed_windows(contexts) -> (emb, loc_scale)`` / ``describe``),
+    CPU-only, no downloads. Accepts variable-length contexts (a list of ``(L_i, C)``
+    arrays) or a fixed ``(N, W, C)`` array, mirroring embed()'s native input. The
+    ``loc_scale`` return is the per-channel mean/std of each context (shape
+    ``(N, C, 2)``), standing in for Chronos-2's instance-norm loc/scale. Counts calls
+    so tests can assert Stage A idempotency and that sweeps never re-embed.
     """
 
     def __init__(self, feature_dim: int = 32, seed: int = 0):
@@ -84,15 +87,28 @@ class MockEmbedder:
         self.seed = seed
         self.n_calls = 0
         self._proj = None
+        self.last_throughput = None
 
-    def embed_windows(self, windows: np.ndarray) -> np.ndarray:
+    def embed_windows(self, contexts) -> tuple[np.ndarray, np.ndarray]:
         self.n_calls += 1
-        N = windows.shape[0]
-        flat = windows.reshape(N, -1).astype(np.float32)
-        if self._proj is None or self._proj.shape[0] != flat.shape[1]:
+        if isinstance(contexts, np.ndarray) and contexts.ndim == 3:
+            ctx = [contexts[i] for i in range(contexts.shape[0])]
+        else:
+            ctx = list(contexts)
+        if not ctx:
+            return np.empty((0, self.feature_dim), np.float32), np.empty((0, 0, 2), np.float32)
+        n_channels = ctx[0].shape[1]
+        if self._proj is None or self._proj.shape[0] != n_channels:
             rng = np.random.default_rng(self.seed)
-            self._proj = rng.normal(0, 1, size=(flat.shape[1], self.feature_dim)).astype(np.float32)
-        return np.tanh(flat @ self._proj).astype(np.float32)
+            self._proj = rng.normal(0, 1, size=(n_channels, self.feature_dim)).astype(np.float32)
+        feats, loc_scale = [], []
+        for w in ctx:                        # w: (L_i, C), variable L_i
+            w = np.asarray(w, np.float32)
+            mean_t = w.mean(axis=0)          # (C,)
+            std_t = w.std(axis=0)            # (C,)
+            feats.append(np.tanh(mean_t @ self._proj))            # (feature_dim,)
+            loc_scale.append(np.stack([mean_t, std_t], axis=-1))  # (C, 2)
+        return (np.asarray(feats, np.float32), np.asarray(loc_scale, np.float32))
 
     def describe(self) -> dict:
         return {"embedder": "MockEmbedder", "feature_dim": self.feature_dim, "seed": self.seed}

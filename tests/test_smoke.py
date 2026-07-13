@@ -53,8 +53,9 @@ def test_direct_embed_train_metrics(tmp_path):
     win, lab, units = D.make_windows(df_train, cfg.sensor_columns, cfg.window_size)
     assert win.shape[1:] == (cfg.window_size, len(cfg.sensor_columns))
 
-    emb = MockEmbedder(feature_dim=16).embed_windows(win)
+    emb, loc_scale = MockEmbedder(feature_dim=16).embed_windows(win)
     assert emb.shape == (len(win), 16)
+    assert loc_scale.shape == (len(win), len(cfg.sensor_columns), 2)
 
     # tiny train/val split by row is fine here (this is the head, not the sweep)
     n = len(emb); k = int(n * 0.8)
@@ -63,8 +64,8 @@ def test_direct_embed_train_metrics(tmp_path):
     assert np.isfinite(hist["best_val_rmse"])
     pred = T.predict_head(model, emb[k:], "mse", cfg)
     assert pred.min() >= 0 and pred.max() <= cfg.max_rul
-    m = evaluate_predictions(lab[k:], pred)
-    assert np.isfinite(m["rmse"]) and np.isfinite(m["nasa_score"])
+    m = evaluate_predictions(lab[k:], pred, cfg.max_rul)
+    assert np.isfinite(m["rmse_clipped"]) and np.isfinite(m["nasa_unclipped"])
 
 
 def test_cache_is_idempotent_and_sweep_never_reembeds(tmp_path):
@@ -84,10 +85,13 @@ def test_cache_is_idempotent_and_sweep_never_reembeds(tmp_path):
 
     cache = E.load_embedding_cache(cfg)
     for key in ["train_emb", "train_windows", "train_labels", "train_units",
-                "test_emb", "test_windows", "test_labels", "test_units"]:
+                "train_locscale", "test_emb", "test_windows", "test_labels",
+                "test_units", "test_locscale"]:
         assert key in cache
     assert cache["train_emb"].shape[0] == cache["train_windows"].shape[0]
     assert cache["train_emb"].shape[1] == 32
+    assert cache["train_locscale"].shape == (cache["train_emb"].shape[0],
+                                             len(cfg.sensor_columns), 2)
     assert cache["test_emb"].shape[0] == cache["test_windows"].shape[0]
 
     # Stage B: sweep consumes the cache only; embedder must not be touched again.
@@ -96,6 +100,7 @@ def test_cache_is_idempotent_and_sweep_never_reembeds(tmp_path):
         cfg, baseline_names=["predict_mean", "cnn", "lstm"], device="cpu",
     )
     assert embedder.n_calls == 2  # NO re-embedding during the sweep (Task 3)
+    assert results_csv.name == "results_v2.csv"  # v2 schema file (Task 1.4)
 
     rows = list(csv.DictReader(open(results_csv)))
     assert len(rows) > 0
@@ -104,11 +109,17 @@ def test_cache_is_idempotent_and_sweep_never_reembeds(tmp_path):
     assert any("_mlp" in m for m in models)         # TSFM head present
     assert {"predict_mean", "cnn", "lstm"} <= models
     assert {"mse", "corn"} <= losses                # both loss arms ran
+    # both-protocol metric columns present and finite (Task 1.4)
+    for col in ("rmse_clipped", "mae_clipped", "nasa_clipped",
+                "rmse_unclipped", "mae_unclipped", "nasa_unclipped"):
+        assert col in rows[0]
     for r in rows:
         assert int(r["n_units"]) in (2, 4)
-        assert np.isfinite(float(r["rmse"]))
-        assert np.isfinite(float(r["nasa_score"]))
-        assert float(r["mae"]) >= 0
+        assert int(r["schema_version"]) == 2
+        assert np.isfinite(float(r["rmse_clipped"]))
+        assert np.isfinite(float(r["rmse_unclipped"]))
+        assert np.isfinite(float(r["nasa_clipped"]))
+        assert float(r["mae_clipped"]) >= 0
 
     # sampled unit IDs saved per cell (Task 2.3)
     run_dir = Path(cfg.results_dir) / "runs"
@@ -121,6 +132,33 @@ def test_cache_is_idempotent_and_sweep_never_reembeds(tmp_path):
     S.run_sweep(cfg, baseline_names=["predict_mean", "cnn", "lstm"], device="cpu")
     n_after = len(list(csv.DictReader(open(results_csv))))
     assert n_after == n_before
+
+
+def test_ablation_runs_and_selects_cell(tmp_path):
+    """run_ablation orchestrates Stage A (per context/pooling) + head training over
+    the grid on CPU with a mock embedder, and select_best returns a valid cell."""
+    from src import sweep as S
+    cfg = _smoke_config(tmp_path)
+    write_synthetic_cmapss(Path(cfg.data_dir), n_train_units=8, n_test_units=6)
+
+    abl_csv = S.run_ablation(
+        cfg, device="cpu",
+        contexts=[12], feature_sets=["emb", "emb+locscale"],
+        pooling_variants=["mean"], seeds=[0],
+        embedder_factory=lambda c: MockEmbedder(feature_dim=24),
+    )
+    rows = list(csv.DictReader(open(abl_csv)))
+    assert len(rows) >= 3  # emb, emb+locscale, +raw arm, + mean-pooling variant
+    got = {(r["tsfm_context_length"], r["head_features"], r["pooling"]) for r in rows}
+    assert ("12", "emb", "forecast_token") in got
+    assert ("12", "emb+locscale", "forecast_token") in got
+    assert ("12", "emb+locscale+raw", "forecast_token") in got  # raw-fusion arm ran
+    assert any(p == "mean" for (_, _, p) in got)                # pooling variant ran
+
+    best = S.select_best_ablation_cell(abl_csv)
+    assert best["head_features"] in ("emb", "emb+locscale")
+    assert best["tsfm_context_length"] == 12
+    assert np.isfinite(best["mean_rmse_clipped"])
 
 
 @pytest.mark.parametrize("name", ["gbm", "minirocket"])

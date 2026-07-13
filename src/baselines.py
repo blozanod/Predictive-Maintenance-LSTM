@@ -95,7 +95,8 @@ class GBMBaseline(Baseline):
         from lightgbm import LGBMRegressor  # reuse reference impl (Task 2.1)
         Xtr = window_statistics(train_windows)
         self._model = LGBMRegressor(random_state=self.seed, n_estimators=500,
-                                    learning_rate=0.05, verbose=-1)
+                                    learning_rate=0.05, verbose=-1,
+                                    n_jobs=-1)  # all cores (Task 2 perf)
         fit_kw = {}
         if val_windows is not None and len(val_windows):
             fit_kw["eval_set"] = [(window_statistics(val_windows), val_labels)]
@@ -129,7 +130,9 @@ class MiniRocketBaseline(Baseline):
         from sktime.transformations.panel.rocket import MiniRocketMultivariate  # reuse
         from sklearn.linear_model import RidgeCV
 
-        self._transform = MiniRocketMultivariate(random_state=self.seed)
+        # n_jobs=-1: MiniRocket's kernel transform parallelizes trivially over cores
+        # (joblib inside sktime). MiniRocket stays CPU (Task 2 baselines note).
+        self._transform = MiniRocketMultivariate(random_state=self.seed, n_jobs=-1)
         Xtr = self._transform.fit_transform(self._to_sktime(train_windows))
         # Ridge with CV over alphas -- standard ROCKET head (Dempster et al. 2021).
         self._ridge = RidgeCV(alphas=np.logspace(-3, 3, 10))
