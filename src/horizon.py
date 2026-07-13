@@ -225,7 +225,22 @@ def run_horizon_eval(
 
     all_units = np.unique(dc["tr_u"])
     n_units_list = n_units_list if n_units_list is not None else [len(all_units)]
-    done = completed_cells(out_csv, HORIZON_KEYS)
+    # A cell is only skippable if BOTH its metrics (out_csv) and its predictions
+    # (preds_csv) already exist. Gating on out_csv alone desyncs the two files: if
+    # horizon.csv is kept but horizon_predictions.csv is deleted/archived, the
+    # skipped cells never re-emit predictions, and trajectory plots for those seeds
+    # break. Re-emitting a cell present in metrics-only would DUPLICATE metric rows,
+    # so that state is a hard error with a clear remedy instead.
+    done_metrics = completed_cells(out_csv, HORIZON_KEYS)
+    done_preds = completed_cells(preds_csv, HORIZON_KEYS)
+    orphan = done_metrics - done_preds
+    if orphan:
+        raise ValueError(
+            f"{out_csv.name} has {len(orphan)} cell(s) whose predictions are missing "
+            f"from {preds_csv.name} (e.g. {sorted(orphan)[0]}). The two files are out "
+            f"of sync -- archive/delete BOTH together (not just one) and rerun, so "
+            f"metrics and per-cycle predictions regenerate for the same cells.")
+    done = done_metrics & done_preds
 
     def _emit(model_name: str, n_units: int, seed: int, loss: str, pred: np.ndarray):
         for bin_row in horizon_bin_rows(h_y, pred, config.max_rul, bin_edges):

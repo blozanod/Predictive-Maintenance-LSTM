@@ -284,8 +284,27 @@ def plot_horizon_trajectories(
     elif len(caps) > 1:
         raise ValueError(f"predictions file mixes label caps {caps}; pass max_rul= "
                          f"to select one arm")
+    # Pick an AVAILABLE (n_units, seed) instead of assuming seed 0 / max exist.
+    # horizon_predictions.csv only carries cells the run actually (re)emitted, so a
+    # restart that skipped "done" cells (e.g. horizon.csv kept but predictions
+    # archived) may lack seed 0 -- fall back with a note rather than crashing.
+    avail_units = sorted({r["n_units"] for r in rows})
     if n_units is None:
-        n_units = max(r["n_units"] for r in rows)
+        n_units = max(avail_units)
+    elif n_units not in avail_units:
+        raise ValueError(f"no predictions for n_units={n_units}; file has "
+                         f"{avail_units}. Rerun the horizon eval for that unit count.")
+    seeds_here = sorted({r["seed"] for r in rows if r["n_units"] == n_units})
+    if not seeds_here:
+        raise ValueError(f"no prediction rows for n_units={n_units}.")
+    if seed not in seeds_here:
+        alt = seeds_here[0]
+        print(f"[plot_horizon_trajectories] seed {seed} absent for n_units="
+              f"{n_units} (present: {seeds_here}); using seed {alt}. This usually "
+              f"means the horizon run skipped seed {seed} as already-done while its "
+              f"predictions were archived -- archive horizon.csv and "
+              f"horizon_predictions.csv TOGETHER, or rerun to regenerate all seeds.")
+        seed = alt
     rows = [r for r in rows if r["n_units"] == n_units and r["seed"] == seed]
     arms = sorted({(r["model"], r["loss"]) for r in rows})
     if models:

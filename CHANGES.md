@@ -298,6 +298,26 @@ gap to the TSFM, the long-context advantage was age, not representation — that
 the honest test the caveat demanded. `run_baseline_window_comparison` (§14) is
 now wired into the notebook (§4b) at windows {30, 60, 120}.
 
+## 20. Horizon file-sync guard (bugfix)
+`horizon.csv` (metrics) and `horizon_predictions.csv` (per-cycle predictions) are
+two append-only files written together per cell but formerly gated on `horizon.csv`
+alone. Archiving/deleting only ONE (e.g. the §18 note said to archive
+`horizon_predictions.csv` before rerunning, but not `horizon.csv`) desynced them:
+the kept `horizon.csv` marked seeds 0-2 "done", so those cells were skipped and
+never re-emitted predictions, leaving `horizon_predictions.csv` with only the newly
+run seeds. `plot_horizon_trajectories`'s default `seed=0` then found zero rows and
+matplotlib raised the opaque "Number of columns must be a positive integer, not 0".
+
+Two fixes:
+- `run_horizon_eval` now gates skips on BOTH files (`done = metrics ∩ predictions`)
+  and, if `horizon.csv` has cells whose predictions are missing, raises a clear
+  error naming the desync and the remedy (archive/delete BOTH together) instead of
+  silently producing an incomplete predictions file.
+- `plot_horizon_trajectories` selects an AVAILABLE `(n_units, seed)` from the file
+  rather than assuming `seed=0`/max exist; if the requested seed is absent it falls
+  back to a present one with a printed note, and raises a clear message only when a
+  unit count is genuinely absent.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 FD002–FD004 & N-CMAPSS/bearings; TimesFM/MOMENT/TTM/Moirai (the `model_name`
 string + `Embedder` protocol are the slot-in points); condition-wise normalization
