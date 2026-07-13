@@ -142,6 +142,74 @@ def append_result_row(csv_path: str | Path, row: dict) -> None:
         w.writerow(row)
 
 
+def ensure_csv_schema(csv_path: str | Path, fieldnames: list[str]) -> None:
+    """Fail LOUDLY if an existing results CSV has a different header than the rows
+    about to be appended. ``append_result_row`` writes values in the new row's key
+    order without re-writing the header, so appending a changed schema would
+    silently misalign columns -- the caller must archive the old file instead."""
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        return
+    with open(csv_path, newline="") as f:
+        header = next(csv.reader(f), None)
+    if header is not None and header != list(fieldnames):
+        raise ValueError(
+            f"{csv_path} has header {header} but rows to append have fields "
+            f"{list(fieldnames)}. Move/archive the old file (e.g. into "
+            f"results/archive/) and rerun -- appending would silently misalign columns."
+        )
+
+
+def paired_seed_ttest(
+    horizon_csv: str | Path,
+    model: str = "chronos-2_mlp",
+    loss_a: str = "corn",
+    loss_b: str = "mse",
+    metric: str = "mae_clipped",
+) -> list[dict]:
+    """Paired-by-seed t-test of ``loss_a`` vs ``loss_b`` per (max_rul, n_units,
+    RUL-bin) cell of ``horizon.csv``. Pairing on seed is valid because both loss
+    arms of a seed share the sampled units and the train/val split (sweep
+    protocol), so seed-to-seed variation cancels in the difference.
+
+    Returns one dict per cell: seed-mean of each arm, ``mean_delta`` = mean(a - b)
+    (negative => ``loss_a`` better when the metric is an error), t statistic and
+    two-sided p-value (scipy ``ttest_rel``; nan when < 2 paired seeds). With 5
+    seeds this is a low-powered test -- treat p-values as descriptive and read
+    them alongside the per-bin means, not instead of them."""
+    from scipy import stats as _stats
+
+    cells: dict[tuple, dict[str, dict[int, float]]] = {}
+    with open(horizon_csv, newline="") as f:
+        for r in csv.DictReader(f):
+            if r["model"] != model or r["loss"] not in (loss_a, loss_b):
+                continue
+            key = (r["max_rul"], int(r["n_units"]), r["bin_lo"], r["bin_hi"])
+            cell = cells.setdefault(key, {loss_a: {}, loss_b: {}})
+            cell[r["loss"]][int(r["seed"])] = float(r[metric])
+    out = []
+    for (max_rul, n_units, bin_lo, bin_hi), arms in sorted(cells.items()):
+        seeds = sorted(set(arms[loss_a]) & set(arms[loss_b]))
+        a = np.array([arms[loss_a][s] for s in seeds], np.float64)
+        b = np.array([arms[loss_b][s] for s in seeds], np.float64)
+        d = a - b
+        # zero-variance differences (ties, or a constant offset) have no defined
+        # t statistic -- report nan rather than scipy's +/-inf.
+        if len(seeds) >= 2 and not np.allclose(d, d[0]):
+            t, p = _stats.ttest_rel(a, b)
+        else:
+            t, p = float("nan"), float("nan")
+        out.append({
+            "max_rul": max_rul, "n_units": n_units, "bin_lo": bin_lo, "bin_hi": bin_hi,
+            "metric": metric, "n_seeds": len(seeds),
+            f"mean_{loss_a}": float(a.mean()) if len(seeds) else float("nan"),
+            f"mean_{loss_b}": float(b.mean()) if len(seeds) else float("nan"),
+            "mean_delta": float((a - b).mean()) if len(seeds) else float("nan"),
+            "t": float(t), "p": float(p),
+        })
+    return out
+
+
 def load_results(csv_path: str | Path) -> list[dict]:
     """Load a results CSV as a list of row dicts (numeric fields coerced)."""
     csv_path = Path(csv_path)
