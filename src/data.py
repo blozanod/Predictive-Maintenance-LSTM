@@ -20,13 +20,18 @@ fraction-independent -- computed once over all units (Stage A).
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-from .config import Config, ALL_COLUMNS, SETTING_COLUMNS, CONDITION_SETTING_DECIMALS
+from .config import Config, SETTING_COLUMNS, CONDITION_SETTING_DECIMALS
+from . import datasets as datasets_pkg
+# Re-export the per-dataset raw loaders so ``data.load_cmapss`` / ``data.load_xjtu``
+# stay valid entry points (data.py is the data facade); their implementations live
+# in src/datasets/ (one module per dataset family).
+from .datasets.cmapss import load_cmapss  # noqa: F401
+from .datasets.xjtu import load_xjtu  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -41,12 +46,9 @@ def load_prepared(config: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
     Returns (df_train, df_test), both carrying ``actual_rul``/``clipped_rul`` and
     the canonical C-MAPSS-shaped columns (unit_number, time_cycles, settings,
     sensor channels)."""
-    kind = config.dataset_kind()
-    if kind == "cmapss":
-        df_train, df_test, rul_truth = load_cmapss(config)
-    else:  # xjtu -- emitted in the same canonical frame shape (src/xjtu.py)
-        from . import xjtu
-        df_train, df_test, rul_truth = xjtu.load_xjtu(config)
+    # Raw loading is dispatched by dataset family through the src/datasets/ registry;
+    # every family emits the same canonical frame shape.
+    df_train, df_test, rul_truth = datasets_pkg.load_raw(config)
     df_train = add_train_rul(df_train, config)
     df_test = add_test_rul(df_test, rul_truth, config)
     if config.effective_condition_norm():
@@ -132,36 +134,6 @@ def condition_normalize(
     scaler = fit_condition_scaler(df_train, cols, k_tr)
     return (apply_condition_scaler(df_train, cols, k_tr, scaler),
             apply_condition_scaler(df_test, cols, k_te, scaler))
-
-
-# ---------------------------------------------------------------------------
-# Loading
-# ---------------------------------------------------------------------------
-def load_cmapss(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
-    """Load train, test, and ground-truth test-RUL for ``config.dataset``.
-
-    Returns (df_train, df_test, rul_truth) where rul_truth is indexed by
-    unit_number and holds the provided remaining-cycles-at-last-observed-cycle.
-    """
-    data_dir = Path(config.data_dir)
-    ds = config.dataset
-    df_train = _read_cmapss_txt(data_dir / f"train_{ds}.txt")
-    df_test = _read_cmapss_txt(data_dir / f"test_{ds}.txt")
-
-    rul_path = data_dir / f"RUL_{ds}.txt"
-    rul_values = pd.read_csv(rul_path, header=None).iloc[:, 0].to_numpy()
-    # RUL_FDxxx.txt is ordered by unit number 1..N (Saxena et al. 2008).
-    rul_truth = pd.Series(
-        rul_values, index=pd.RangeIndex(1, len(rul_values) + 1, name="unit_number"),
-        name="rul_truth",
-    )
-    return df_train, df_test, rul_truth
-
-
-def _read_cmapss_txt(path: Path) -> pd.DataFrame:
-    # 26 whitespace-separated columns, trailing whitespace tolerated.
-    df = pd.read_csv(path, sep=r"\s+", header=None, names=ALL_COLUMNS)
-    return df
 
 
 # ---------------------------------------------------------------------------

@@ -98,8 +98,8 @@ def run_transfer_eval(
     seeds = seeds if seeds is not None else config.sweep_seeds[:3]
     losses = losses if losses is not None else ["mse"]
     baseline_names = baseline_names if baseline_names is not None else ["gbm"]
-    out_csv = Path(out_csv) if out_csv else Path(config.results_dir) / "transfer.csv"
-    run_dir = Path(config.results_dir) / "transfer_runs"
+    out_csv = Path(out_csv) if out_csv else config.results_path("transfer.csv")
+    run_dir = config.results_path("transfer_runs")
     run_dir.mkdir(parents=True, exist_ok=True)
 
     src_cfg = config.replace(dataset=source_dataset)

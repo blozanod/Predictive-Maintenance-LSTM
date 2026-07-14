@@ -9,3 +9,9 @@ __pycache__/
 cache/
 results/
 *.npz
+
+# Raw datasets live under one Data/ root (config.data_root). Only the small,
+# committed C-MAPSS text files are tracked; large downloaded datasets a user
+# drops in Data/ (XJTU-SY, N-CMAPSS, ...) are ignored.
+/Data/*
+!/Data/CMAPSSData/

@@ -164,10 +164,10 @@ def run_sweep(
 
     if cache is None:
         cache = load_embedding_cache(config)
-    run_dir = Path(run_dir) if run_dir else Path(config.results_dir) / "runs"
+    run_dir = Path(run_dir) if run_dir else config.results_path("runs")
     run_dir.mkdir(parents=True, exist_ok=True)
     archive_results_v1(config.results_dir)  # never overwrite the v1 numbers (Task 1.4)
-    results_csv = Path(results_csv) if results_csv else Path(config.results_dir) / "results_v2.csv"
+    results_csv = Path(results_csv) if results_csv else config.results_path("results_v2.csv")
     curves_dir = run_dir / "learning_curves"
     save_run_metadata(config, run_dir / "run_metadata.json")
 
@@ -253,8 +253,8 @@ def run_ablation(
     feature_sets = feature_sets or ["emb", "emb+locscale"]
     pooling_variants = pooling_variants or ["mean", "last_content"]
     seeds = seeds or [0, 1, 2]
-    ablation_csv = Path(ablation_csv) if ablation_csv else Path(config.results_dir) / "ablation.csv"
-    run_dir = Path(config.results_dir) / "ablation_runs"
+    ablation_csv = Path(ablation_csv) if ablation_csv else config.results_path("ablation.csv")
+    run_dir = config.results_path("ablation_runs")
     curves_dir = run_dir / "learning_curves"
     run_dir.mkdir(parents=True, exist_ok=True)
     model_tag = config.model_name.split("/")[-1] + "_mlp"
@@ -354,7 +354,7 @@ def run_baseline_window_comparison(
     windows = windows or [config.window_size, 120]
     baseline_names = baseline_names or ["gbm", "lstm"]
     seeds = seeds or [0, 1, 2]
-    out_csv = Path(out_csv) if out_csv else Path(config.results_dir) / "baseline_window_comparison.csv"
+    out_csv = Path(out_csv) if out_csv else config.results_path("baseline_window_comparison.csv")
 
     df_train, df_test = data_mod.load_prepared(config)
     cols = config.sensor_columns
@@ -405,7 +405,7 @@ def run_fairness_baselines(
     Known caveat (as for all fixed-window baselines, §14): front-padding short
     test units repeats the first cycle's ``time_cycles``; the LAST value -- the
     true age at prediction time -- is always real. Restartable; CPU-only."""
-    results_csv = Path(results_csv) if results_csv else Path(config.results_dir) / "results_v2.csv"
+    results_csv = Path(results_csv) if results_csv else config.results_path("results_v2.csv")
     seeds = seeds if seeds is not None else list(config.sweep_seeds)
 
     df_train, df_test = data_mod.load_prepared(config)

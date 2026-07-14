@@ -95,11 +95,16 @@ class Config:
     deterministic: bool = True  # torch deterministic algorithms where feasible (Task 2.3)
 
     # ---- dataset -----------------------------------------------------------
-    # C-MAPSS "FD001".."FD004" (data_dir = CMAPSSData) or "XJTU-SY" bearings
-    # (data_dir = the XJTU-SY root containing the 3 condition folders; see
-    # src/xjtu.py for layout, feature channels, and the split protocol).
+    # C-MAPSS "FD001".."FD004" or "XJTU-SY" bearings. The raw files live under ONE
+    # ``data_root`` folder, one subdirectory per dataset family, resolved by the
+    # loader registry (src/datasets/): FD00x -> ``data_root/CMAPSSData``, XJTU-SY ->
+    # ``data_root/XJTU-SY`` (the 3 condition folders; see src/datasets/xjtu.py).
     dataset: str = "FD001"
-    data_dir: str = "CMAPSSData"
+    # One root housing every dataset (config.data_root/<subdir>). ``data_dir``
+    # overrides this with an explicit, dataset-specific path when set (tests point it
+    # straight at a synthetic folder); leave it None to use the data_root layout.
+    data_root: str = "Data"
+    data_dir: Optional[str] = None
     # Condition-wise normalization (plan §6): per-condition z-normalization of the
     # sensor channels, statistics fit on the TRAIN split (all units, once -- the
     # cache-economics deviation is documented in CHANGES.md §21). None => auto:
@@ -219,6 +224,13 @@ class Config:
     # ---- paths -------------------------------------------------------------
     cache_dir: str = "cache"      # embedding + window caches (Stage A output)
     results_dir: str = "results"  # metrics CSVs, run metadata, sampled unit IDs
+    # Names every result artifact this run writes: CSVs become
+    # ``<experiment_name>_<name>.csv`` and figures ``<experiment_name>_<name>.png``,
+    # and the per-run bookkeeping dirs are ``<experiment_name>_runs`` etc. Set it in
+    # the notebook's Config cell so experiments never clobber each other's results.
+    # "" => no prefix (the historical flat layout; keeps existing files untouched).
+    # NOT part of any cache key -- it names outputs only, never affects embeddings.
+    experiment_name: str = ""
 
     # -- validation ----------------------------------------------------------
     def __post_init__(self):
@@ -263,6 +275,22 @@ class Config:
         if self.condition_norm is not None:
             return bool(self.condition_norm)
         return self.dataset in MULTI_CONDITION_DATASETS or self.dataset in XJTU_DATASETS
+
+    # ---- result-artifact paths (experiment-namespaced) ---------------------
+    def result_prefix(self) -> str:
+        """Filename prefix applied to every result artifact: ``<experiment_name>_``
+        (or "" when ``experiment_name`` is unset, preserving the flat layout)."""
+        return f"{self.experiment_name}_" if self.experiment_name else ""
+
+    def results_path(self, name: str) -> Path:
+        """Path under ``results_dir`` for a result CSV or per-run bookkeeping dir,
+        prefixed with the experiment name so runs never clobber each other
+        (e.g. ``results/<exp>_results_v2.csv``, ``results/<exp>_runs``)."""
+        return Path(self.results_dir) / f"{self.result_prefix()}{name}"
+
+    def figures_dir(self) -> Path:
+        """Directory for Stage C figures (filenames carry the experiment prefix)."""
+        return Path(self.results_dir) / "figures"
 
     # ---- cache keys --------------------------------------------------------
     def _window_key_fields(self) -> dict:

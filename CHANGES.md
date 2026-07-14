@@ -354,7 +354,7 @@ The breadth arm (plan §7 Phase 4) starts here. Changes:
   (dataset, cap, n_units); `plot_horizon_trajectories` requires a `dataset=`
   selection when the predictions file mixes datasets (unit IDs collide).
 
-## 22. XJTU-SY bearing loader (src/xjtu.py) — the non-CMAPSS stress test
+## 22. XJTU-SY bearing loader (src/datasets/xjtu.py) — the non-CMAPSS stress test
 Adapts the XJTU-SY run-to-failure bearing dataset (15 bearings, 3 operating
 conditions, 25.6 kHz vibration snapshots once per minute; download:
 https://biaowang.tech/xjtu-sy-bearing-datasets/) into the SAME canonical frame
@@ -375,10 +375,42 @@ C-MAPSS uses, so every downstream stage runs unchanged. Decisions (all
 - `max_rul` is in MINUTES here; the FD-convention 125 is arbitrary for bearings
   (lifetimes span ~35 min to ~42 h) — choose per experiment and record it.
 
+## 23. Source reorg: datasets/ + models/ registries, one Data/ root, named results
+Structural cleanup only — **no numeric result, cache key, or CSV schema changes**;
+all 48 CPU tests pass unchanged and every recorded run (§12) stays valid.
+- **`src/datasets/` (one module per dataset family, behind a registry).** The raw
+  loaders moved out of `data.py`/`src/xjtu.py` into `datasets/cmapss.py` (FD001–FD004)
+  and `datasets/xjtu.py`; `datasets/__init__.load_raw` dispatches by
+  `config.dataset_kind()`. `data.py` keeps the preprocessing hub + the unified
+  `load_prepared` entry point (CHANGES §21) and **re-exports** `load_cmapss`/`load_xjtu`
+  so `data.load_cmapss` stays valid. Adding N-CMAPSS is one new module + one registry
+  entry.
+- **`src/models/` (one module per TSFM, behind a registry).** `ChronosEmbedder` moved
+  from `embeddings.py` to `models/chronos.py`; `models/make_embedder` selects the class
+  for `config.model_name` (`EMBEDDERS` registry). This is the concrete realization of
+  the TimesFM/MOMENT/TTM/Moirai slot-in point. `embeddings.py` keeps the model-agnostic
+  cache/pooling/loc-scale plumbing and the injectable-embedder contract (tests still
+  pass a mock). The specialized from-scratch models stay in `baselines.py` (the plan's
+  foundation-vs-baseline split).
+- **One `Data/` root for every dataset (`config.data_root`, default `Data`).** Each
+  dataset declares its subdirectory (`CMAPSSData`, `XJTU-SY`); `datasets.resolve_data_dir`
+  maps `data_root/<subdir>`, or honours an explicit `config.data_dir` override (unchanged
+  test behaviour — tests set `data_dir`). The committed C-MAPSS files moved to
+  `Data/CMAPSSData/`; `.gitignore` keeps them tracked and ignores other large datasets
+  dropped under `Data/`. **`data_root`/`data_dir` are NOT in any cache key** (embeddings
+  are location-independent).
+- **Experiment-named result files (`config.experiment_name`).** Every result CSV,
+  figure, and per-run bookkeeping dir is prefixed via `config.results_path(name)` /
+  `config.result_prefix()` / `config.figures_dir()` (plots take a `prefix=`), e.g.
+  `results/<exp>_results_v2.csv`, `results/figures/<exp>_data_scaling_rmse_clipped.png`,
+  `results/<exp>_runs/`, so separate experiments never clobber each other. Default `""`
+  reproduces the historical flat names byte-for-byte (why the tests are untouched).
+  **Not in any cache key** — it names outputs only.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 N-CMAPSS (download located — see RESEARCH_PLAN §3 note — but the 20+ GB h5
-loader/downsampling design is its own task); TimesFM/MOMENT/TTM/Moirai (the
-`model_name` string + `Embedder` protocol are the slot-in points);
-experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
-conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only
-from completed runs.
+loader/downsampling design is its own task; the `datasets/` registry is the slot-in
+point, §23); TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
+`model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,
+comparisons, or conclusions are written anywhere (Task 2.5) — recorded winners (§12)
+come only from completed runs.

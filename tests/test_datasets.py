@@ -13,7 +13,7 @@ import pytest
 
 from src.config import Config
 from src import data as D
-from src.xjtu import XJTU_FEATURE_COLUMNS, load_xjtu
+from src.datasets.xjtu import XJTU_FEATURE_COLUMNS, load_xjtu
 from tests.synthetic import write_synthetic_cmapss, write_synthetic_xjtu, MockEmbedder
 
 

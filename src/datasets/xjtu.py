@@ -39,7 +39,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import Config
+from ..config import Config
+from .base import resolve_data_dir
+
+# Subdirectory of ``config.data_root`` holding the 3 XJTU-SY condition folders.
+XJTU_SUBDIR = "XJTU-SY"
 
 # Time-domain condition indicators per axis (h_ = horizontal, v_ = vertical).
 _BASE_FEATURES = ["rms", "kurtosis", "skewness", "peak", "p2p",
@@ -98,7 +102,7 @@ def load_xjtu(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     split + test-truncation protocol. Mirrors ``data.load_cmapss``'s return
     contract: (df_train, df_test, rul_truth), rul_truth indexed by unit_number =
     remaining cycles (minutes) at each TEST unit's last kept snapshot."""
-    root = Path(config.data_dir)
+    root = resolve_data_dir(config, XJTU_SUBDIR)
     found = {}
     for cond_name, cond in XJTU_CONDITIONS.items():
         cond_dir = root / cond_name
