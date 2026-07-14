@@ -142,10 +142,10 @@ def write_synthetic_xjtu(
     samples_per_snapshot: int = 256,
     seed: int = 0,
 ) -> None:
-    """Write a miniature XJTU-SY directory tree (src/xjtu.py layout): 3 condition
-    folders x N ``BearingC_B`` folders x one 2-column CSV per minute. Vibration
-    amplitude grows toward failure so the extracted indicators carry RUL signal."""
-    from src.xjtu import XJTU_CONDITIONS
+    """Write a miniature XJTU-SY directory tree (src/datasets/xjtu.py layout): 3
+    condition folders x N ``BearingC_B`` folders x one 2-column CSV per minute.
+    Vibration amplitude grows toward failure so the indicators carry RUL signal."""
+    from src.datasets.xjtu import XJTU_CONDITIONS
 
     root = Path(root)
     rng = np.random.default_rng(seed)

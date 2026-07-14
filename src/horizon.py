@@ -93,8 +93,8 @@ def build_horizon_cache(
     assert np.array_equal(te_u, te_u2) and np.allclose(te_y, te_y2), "horizon varlen misaligned"
 
     if embedder is None:
-        from .embeddings import ChronosEmbedder
-        embedder = ChronosEmbedder(config)
+        from .models import make_embedder
+        embedder = make_embedder(config)
     te_emb, te_ls = embedder.embed_windows(te_ctx)
     if verbose and getattr(embedder, "last_throughput", None):
         print(f"[Stage A-H] test-all-cycles embed throughput: "
@@ -190,9 +190,9 @@ def run_horizon_eval(
         cache = load_embedding_cache(config)
     if hcache is None:
         hcache = load_horizon_cache(config)
-    out_csv = Path(out_csv) if out_csv else Path(config.results_dir) / "horizon.csv"
-    preds_csv = Path(preds_csv) if preds_csv else Path(config.results_dir) / "horizon_predictions.csv"
-    run_dir = Path(config.results_dir) / "horizon_runs"
+    out_csv = Path(out_csv) if out_csv else config.results_path("horizon.csv")
+    preds_csv = Path(preds_csv) if preds_csv else config.results_path("horizon_predictions.csv")
+    run_dir = config.results_path("horizon_runs")
     run_dir.mkdir(parents=True, exist_ok=True)
     save_run_metadata(config, run_dir / "run_metadata.json")
 

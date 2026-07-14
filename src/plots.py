@@ -50,11 +50,14 @@ def _series_style(label: str) -> dict:
     return dict({"ls": _LOSS_LINESTYLE.get(loss, "-")}, **style)
 
 
-def _save(fig, out_dir: Path, name: str) -> list[Path]:
+def _save(fig, out_dir: Path, name: str, prefix: str = "") -> list[Path]:
+    """Save ``fig`` as ``<out_dir>/<prefix><name>.{png,pdf}``. ``prefix`` carries the
+    experiment name (``config.result_prefix()``) so figures from different
+    experiments never overwrite each other; "" keeps the historical flat names."""
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for ext, kw in (("png", {"dpi": 300}), ("pdf", {})):
-        p = out_dir / f"{name}.{ext}"
+        p = out_dir / f"{prefix}{name}.{ext}"
         fig.savefig(p, bbox_inches="tight", **kw)
         paths.append(p)
     return paths
@@ -74,6 +77,7 @@ def plot_data_scaling(
     metrics: Optional[list[tuple[str, str]]] = None,
     sanity_gate: Optional[float] = 14.0,
     show: bool = True,
+    prefix: str = "",
 ) -> list[Path]:
     """The headline figure(s): metric vs. training units, mean +/- std over seeds.
 
@@ -120,7 +124,7 @@ def plot_data_scaling(
         ax.set_title(f"Data-scaling curve (FD001) — {ylabel}")
         ax.grid(alpha=0.25)
         ax.legend(fontsize=8, framealpha=0.9)
-        saved += _save(fig, out_dir, f"data_scaling_{metric}")
+        saved += _save(fig, out_dir, f"data_scaling_{metric}", prefix)
         plt.show() if show else plt.close(fig)
     return saved
 
@@ -130,6 +134,7 @@ def plot_ablation(
     out_dir: str | Path,
     metric: str = "rmse_clipped",
     show: bool = True,
+    prefix: str = "",
 ) -> list[Path]:
     """Context-length ablation: ``metric`` (mean +/- std over seeds) vs. TSFM
     context length, one line per head_features, at the default pooling; the
@@ -174,7 +179,7 @@ def plot_ablation(
     ax.set_title("Ablation: context length x head features (full data)")
     ax.grid(alpha=0.25)
     ax.legend(fontsize=8, framealpha=0.9)
-    saved = _save(fig, out_dir, f"ablation_{metric}")
+    saved = _save(fig, out_dir, f"ablation_{metric}", prefix)
     plt.show() if show else plt.close(fig)
     return saved
 
@@ -191,6 +196,7 @@ def plot_horizon(
     horizon_csv: str | Path,
     out_dir: str | Path,
     show: bool = True,
+    prefix: str = "",
 ) -> list[Path]:
     """Horizon-stratified error: MAE and bias vs. true-RUL bin, one figure per
     (label cap, training-unit count) arm -- the cap arms (CHANGES.md §18) get
@@ -248,7 +254,7 @@ def plot_horizon(
         ax_mae.legend(fontsize=8, framealpha=0.9)
         fig.suptitle(f"Error vs. prediction horizon "
                      f"({ds}, trained on {n_units} units, label cap {max_rul})")
-        saved += _save(fig, out_dir, f"horizon_{ds}_mr{max_rul}_n{n_units}")
+        saved += _save(fig, out_dir, f"horizon_{ds}_mr{max_rul}_n{n_units}", prefix)
         plt.show() if show else plt.close(fig)
     return saved
 
@@ -263,6 +269,7 @@ def plot_horizon_trajectories(
     max_rul: Optional[float] = None,
     dataset: Optional[str] = None,
     show: bool = True,
+    prefix: str = "",
 ) -> list[Path]:
     """Predicted vs. true RUL along a few test-unit trajectories (the qualitative
     view of far-end behavior: does the prediction track the truth or flatline?).
@@ -358,7 +365,7 @@ def plot_horizon_trajectories(
     ds_tag = f"_{dataset}" if dataset else (f"_{datasets[0]}" if datasets else "")
     cap_tag = f"_mr{int(max_rul)}" if max_rul is not None else ""
     saved = _save(fig, out_dir,
-                  f"horizon_trajectories{ds_tag}{cap_tag}_n{n_units}_seed{seed}")
+                  f"horizon_trajectories{ds_tag}{cap_tag}_n{n_units}_seed{seed}", prefix)
     plt.show() if show else plt.close(fig)
     return saved
 
@@ -368,6 +375,7 @@ def plot_transfer(
     out_dir: str | Path,
     metric: str = "rmse_clipped",
     show: bool = True,
+    prefix: str = "",
 ) -> list[Path]:
     """Cold-start curve: ``metric`` on the TARGET test set vs. number of target
     failures used. zero_shot arms are horizontal reference lines (they use no
@@ -406,7 +414,7 @@ def plot_transfer(
     ax.set_title(f"Cold-start transfer: {src} → {tgt}")
     ax.grid(alpha=0.25)
     ax.legend(fontsize=8, framealpha=0.9)
-    saved = _save(fig, out_dir, f"transfer_{src}_to_{tgt}_{metric}")
+    saved = _save(fig, out_dir, f"transfer_{src}_to_{tgt}_{metric}", prefix)
     plt.show() if show else plt.close(fig)
     return saved
 
@@ -420,6 +428,7 @@ def plot_learning_curves(
     metric: str = "val_rmse",
     losses: Optional[list[str]] = None,
     show: bool = True,
+    prefix: str = "",
 ) -> list[Path]:
     """Validation-RMSE learning curves, one panel per loss arm. Curves are colored
     by training-unit count (sequential: darker = more units); seeds share a color.
@@ -453,6 +462,6 @@ def plot_learning_curves(
         ax.legend(fontsize=8, title="training units", framealpha=0.9)
     axes[0][0].set_ylabel(metric)
     fig.suptitle(f"Learning curves ({metric})")
-    saved = _save(fig, out_dir, f"learning_curves_{metric}")
+    saved = _save(fig, out_dir, f"learning_curves_{metric}", prefix)
     plt.show() if show else plt.close(fig)
     return saved
