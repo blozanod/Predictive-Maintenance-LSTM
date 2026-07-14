@@ -23,6 +23,15 @@ from .base import resolve_data_dir
 # Subdirectory of ``config.data_root`` holding the C-MAPSS text files.
 CMAPSS_SUBDIR = "CMAPSSData"
 
+# Dataset names this family serves (the campaign sweeps these, CHANGES.md §24).
+DATASETS = ("FD001", "FD002", "FD003", "FD004")
+
+
+def is_available(config: Config) -> bool:
+    """Cheap on-disk check: does this dataset's train file exist? (The campaign
+    skips unavailable datasets with a notice instead of crashing mid-run-all.)"""
+    return (resolve_data_dir(config, CMAPSS_SUBDIR) / f"train_{config.dataset}.txt").is_file()
+
 
 def load_cmapss(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     """Load train, test, and ground-truth test-RUL for ``config.dataset``.

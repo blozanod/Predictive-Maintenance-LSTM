@@ -206,3 +206,66 @@ def test_xjtu_rejects_bad_split(xjtu_root, tmp_path):
         xjtu_test_bearings=["Bearing9_9"])
     with pytest.raises(ValueError, match="not on disk"):
         load_xjtu(cfg)
+
+
+# ---------------------------------------------------------------------------
+# §24 fixes: registry consistency, sensor-column defaults, experiment_name guard
+# ---------------------------------------------------------------------------
+def test_dataset_kind_and_registry_never_drift():
+    """Every dataset name any family serves must round-trip through
+    config.dataset_kind() into a registered loader family, and every registry
+    kind must serve at least one name -- adding a dataset family requires
+    touching both, and this test is the drift alarm."""
+    from src import datasets as DS
+    for name in DS.all_dataset_names():
+        kind = Config(dataset=name).dataset_kind()
+        assert kind in DS.DATASET_LOADERS and kind in DS.DATASET_FAMILIES
+    assert set(DS.DATASET_LOADERS) == set(DS.DATASET_FAMILIES)
+    served = {Config(dataset=n).dataset_kind() for n in DS.all_dataset_names()}
+    assert served == set(DS.DATASET_FAMILIES)
+
+
+def test_sensor_columns_default_resolution_and_key_stability():
+    from src.config import (Config, FD001_NONCONSTANT_SENSORS,
+                            XJTU_FEATURE_COLUMNS)
+    c = Config()  # sensor_columns=None -> FD001 default
+    assert c.sensor_columns == list(FD001_NONCONSTANT_SENSORS)
+    # resolved default hashes identically to the previously-required explicit list
+    assert (c.embedding_cache_key()
+            == Config(sensor_columns=list(FD001_NONCONSTANT_SENSORS)).embedding_cache_key())
+    # replace() with sensor_columns=None re-resolves for the NEW dataset
+    x = c.replace(dataset="XJTU-SY", sensor_columns=None)
+    assert x.sensor_columns == list(XJTU_FEATURE_COLUMNS)
+    # a dataset switch WITHOUT resetting keeps the explicit list (caller's choice)
+    kept = c.replace(dataset="XJTU-SY")
+    assert kept.sensor_columns == list(FD001_NONCONSTANT_SENSORS)
+
+
+def test_experiment_name_guard():
+    Config(experiment_name="fd001_chronos-2.v1")           # allowed charset
+    for bad in ("has space", "slash/y", "semi;colon"):
+        with pytest.raises(ValueError, match="experiment_name"):
+            Config(experiment_name=bad)
+
+
+def test_plot_data_scaling_facets_by_dataset(tmp_path):
+    """A results CSV holding two datasets must yield per-dataset figures, never
+    one pooled curve (the pre-§24 silent-mixing bug)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from src.evaluate import append_result_row
+    from src.plots import plot_data_scaling
+
+    csv_path = tmp_path / "results_v2.csv"
+    for ds, base in (("FD001", 20.0), ("FD003", 40.0)):
+        for n_units in (2, 4):
+            for seed in (0, 1):
+                append_result_row(csv_path, {
+                    "model": "gbm", "dataset": ds, "n_units": n_units,
+                    "seed": seed, "loss": "native",
+                    "rmse_clipped": base - n_units + seed})
+    saved = plot_data_scaling(csv_path, tmp_path / "figs", show=False,
+                              metrics=[("rmse_clipped", "test RMSE")])
+    names = {p.name for p in saved}
+    assert "data_scaling_FD001_rmse_clipped.png" in names
+    assert "data_scaling_FD003_rmse_clipped.png" in names

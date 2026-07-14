@@ -65,26 +65,23 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-## Run on Colab (cell order)
+## Run on Colab
 
-Open `notebooks/colab_main.ipynb` and run cells top to bottom:
+Open `notebooks/colab_main.ipynb` and hit **Run all** (CHANGES.md §24):
 
 1. **Setup** — installs, mount Drive, add repo to `sys.path`, print GPU.
-2. **Config** — point `data_root`/`cache_dir`/`results_dir` at your Drive (the raw
-   datasets live under one `data_root`, e.g. `Data/CMAPSSData`, `Data/XJTU-SY`), set
-   `experiment_name` so every CSV/figure is prefixed, and override any ablation knob
-   (`tsfm_context_length`, `head_features`, `pooling`, losses, embed batch/dtype).
-3. **Stage A** — `build_embedding_cache(config)`: Chronos-2 `embed()` on GPU →
-   Drive cache (fp16 embeddings + loc/scale + fixed windows). Idempotent; the only
-   GPU-heavy stage (run once per embedding config).
-4. **Stage A2** — `run_ablation(config)`: full-data MSE grid over context ×
-   head_features (+ raw-fusion arm, pooling variants); `select_best_ablation_cell`
-   picks the winner by clipped RMSE.
-5. **Stage B** — `run_sweep(sweep_config)`: trains heads + baselines on the cache at
-   the winning config → `results_v2.csv` (both protocols). Cheap, rerunnable,
-   checkpointed after every cell.
-6. **Stage C** — plots the data-scaling curve (headline, clipped + unclipped) and
-   learning curves.
+2. **Config** — point `data_root`/`cache_dir`/`results_dir` at your Drive (raw
+   datasets live under one `data_root`, e.g. `Data/CMAPSSData`, `Data/XJTU-SY`).
+   Defaults are the recorded FD001 ablation winner (CHANGES.md §12).
+3. **Campaign** — `run_campaign(config)`: every dataset in `src/datasets/` × every
+   TSFM in `src/models/`; per combo it runs Stage A cache → data-scaling sweep →
+   fairness arms → horizon eval → saved figures, each stage restartable. Datasets
+   not downloaded into `Data/` are skipped with a notice; every artifact is named
+   `<dataset>_<model>_…` (e.g. `results/FD002_chronos-2_results_v2.csv`).
+4. **Deep-dives** (optional; set `RUN_DEEP_DIVES = True` in the Config cell) —
+   the single-dataset studies: the context/feature ablation, learning curves, the
+   CORN-vs-MSE paired-significance table, the raised-label-cap arm (max_rul=200),
+   and the FD001→FD003 cold-start transfer.
 
 ## Audit the uncited decisions
 

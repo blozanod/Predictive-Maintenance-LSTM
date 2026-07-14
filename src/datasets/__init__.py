@@ -19,6 +19,9 @@ DATASET_LOADERS = {
     "xjtu": (xjtu.load_xjtu, xjtu.XJTU_SUBDIR),
 }
 
+# dataset kind -> family module (DATASETS names + is_available live there).
+DATASET_FAMILIES = {"cmapss": cmapss, "xjtu": xjtu}
+
 
 def load_raw(config: Config):
     """Dispatch to the loader for ``config.dataset`` and return its raw
@@ -28,5 +31,16 @@ def load_raw(config: Config):
     return loader(config)
 
 
-__all__ = ["DATASET_LOADERS", "load_raw", "resolve_data_dir",
-           "cmapss", "xjtu"]
+def all_dataset_names() -> list[str]:
+    """Every dataset name any registered family serves, in registry order --
+    the campaign's default sweep list (CHANGES.md §24)."""
+    return [name for fam in DATASET_FAMILIES.values() for name in fam.DATASETS]
+
+
+def is_available(config: Config) -> bool:
+    """Cheap on-disk availability check for ``config.dataset`` (no full load)."""
+    return DATASET_FAMILIES[config.dataset_kind()].is_available(config)
+
+
+__all__ = ["DATASET_LOADERS", "DATASET_FAMILIES", "load_raw", "resolve_data_dir",
+           "all_dataset_names", "is_available", "cmapss", "xjtu"]

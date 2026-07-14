@@ -39,16 +39,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ..config import Config
+# XJTU_FEATURE_COLUMNS/XJTU_BASE_FEATURES live in config.py (they seed the
+# per-dataset sensor-column defaults there without an import cycle) and are
+# re-exported here, where the features are computed.
+from ..config import Config, XJTU_BASE_FEATURES, XJTU_FEATURE_COLUMNS
 from .base import resolve_data_dir
 
 # Subdirectory of ``config.data_root`` holding the 3 XJTU-SY condition folders.
 XJTU_SUBDIR = "XJTU-SY"
 
-# Time-domain condition indicators per axis (h_ = horizontal, v_ = vertical).
-_BASE_FEATURES = ["rms", "kurtosis", "skewness", "peak", "p2p",
-                  "crest", "impulse", "shape"]
-XJTU_FEATURE_COLUMNS = [f"{ax}_{f}" for ax in ("h", "v") for f in _BASE_FEATURES]
+# Dataset names this family serves (the campaign sweeps these, CHANGES.md §24).
+DATASETS = ("XJTU-SY",)
+
+_BASE_FEATURES = list(XJTU_BASE_FEATURES)
 
 # Condition folder -> (index, speed Hz, radial force kN). Folder names as shipped.
 XJTU_CONDITIONS = {
@@ -95,6 +98,13 @@ def _bearing_frame(bearing_dir: Path, unit_id: int, cond: tuple) -> pd.DataFrame
     cols = (["unit_number", "time_cycles", "setting_1", "setting_2", "setting_3"]
             + XJTU_FEATURE_COLUMNS)
     return pd.DataFrame(rows, columns=cols)
+
+
+def is_available(config: Config) -> bool:
+    """Cheap on-disk check: does at least one XJTU-SY condition folder exist?
+    (The campaign skips unavailable datasets with a notice, CHANGES.md §24.)"""
+    root = resolve_data_dir(config, XJTU_SUBDIR)
+    return any((root / name).is_dir() for name in XJTU_CONDITIONS)
 
 
 def load_xjtu(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:

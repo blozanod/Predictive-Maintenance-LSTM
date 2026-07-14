@@ -407,6 +407,47 @@ all 48 CPU tests pass unchanged and every recorded run (§12) stays valid.
   reproduces the historical flat names byte-for-byte (why the tests are untouched).
   **Not in any cache key** — it names outputs only.
 
+## 24. Run-all campaign, per-dataset sensor defaults, dataset-faceted figures
+Follow-ups to the §23 reorg review (four fixes + the run-all button):
+- **`plot_data_scaling` no longer pools datasets (bugfix).** Results CSVs may hold
+  several datasets (§21 keys them into the sweep cells), but the aggregation
+  grouped by (model, loss) only — two datasets under one experiment name silently
+  averaged into one curve. It now facets: one figure per (dataset, metric), the
+  dataset in the title (killing the hardcoded "FD001") and in the filename when
+  the CSV holds more than one. `aggregate_data_scaling` gained a `dataset=` filter.
+- **Per-dataset default sensor columns.** `sensor_columns=None` (the new default)
+  resolves in `__post_init__` via `DEFAULT_SENSOR_COLUMNS[dataset_kind()]`
+  (C-MAPSS → the FD001 14-sensor list, XJTU-SY → its 16 indicator channels), so
+  switching datasets is one knob instead of a cryptic KeyError deep in
+  preprocessing. The resolved defaults equal the previously-required explicit
+  lists, so every cache key is unchanged (asserted in tests).
+  `XJTU_FEATURE_COLUMNS` moved to config.py (re-exported by datasets/xjtu.py) to
+  avoid an import cycle. An explicit list still wins and survives `replace()`.
+- **Registry drift alarm.** `config.dataset_kind()` and the `datasets/` registry
+  are cross-checked by a test (every served name maps to a registered family and
+  vice versa) so adding N-CMAPSS can't silently miss one of the two.
+- **`experiment_name` validation**: letters/digits/`._-` only — it lands in every
+  result filename.
+- **`src/campaign.py` — the Run-all button.** `run_campaign(base_config)` sweeps
+  `datasets.all_dataset_names()` × `models.EMBEDDERS`; per combo it runs
+  cache → sweep → fairness → horizon → figures (each restartable, so re-running
+  resumes). Datasets missing from `Data/` are SKIPPED with a notice; a failing
+  combo is reported with its traceback and the campaign continues, raising only
+  when every combo failed. Each combo runs under experiment namespace
+  `<dataset>_<model-tag>` (base `experiment_name` prepended when set), so every
+  CSV/figure/run-dir filename states its dataset and TSFM, e.g.
+  `results/FD002_chronos-2_results_v2.csv`. `dataset_overrides` carries
+  per-dataset protocol choices (XJTU-SY needs deliberate `max_rul`/`window_size`
+  — its cycles are minutes); `sensor_columns` always resolves to the dataset
+  default inside the campaign (DECISION: a base-config list would silently be
+  wrong for every other dataset — put custom channels in `dataset_overrides`).
+  Baselines rerun per combo so each experiment file is self-contained for its
+  figures (duplicate CPU work across models of one dataset — accepted).
+- **Notebook**: campaign-first layout — "Run all" executes §3 (the campaign);
+  the single-dataset deep-dives (ablation, learning curves, significance table,
+  raised-cap arm, transfer) are gated behind `RUN_DEEP_DIVES=False` in the
+  Config cell, which now carries the recorded §12 winner as its defaults.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 N-CMAPSS (download located — see RESEARCH_PLAN §3 note — but the 20+ GB h5
 loader/downsampling design is its own task; the `datasets/` registry is the slot-in

@@ -231,13 +231,18 @@ def load_results(csv_path: str | Path) -> list[dict]:
 
 
 def aggregate_data_scaling(
-    csv_path: str | Path, metric: str = "rmse_clipped"
+    csv_path: str | Path, metric: str = "rmse_clipped",
+    dataset: Optional[str] = None,
 ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Aggregate the data-scaling curve: for each (model, loss) series return
     (unit_counts, mean, std) of ``metric`` over seeds -- the headline figure with
     error bands (RESEARCH_PLAN sec.6). Keeps NO logic in the notebook. ``metric``
-    defaults to the literature-comparable clipped RMSE (Task 1.4)."""
+    defaults to the literature-comparable clipped RMSE (Task 1.4). ``dataset``
+    filters to one dataset's rows -- results CSVs may hold several (§21), and
+    pooling them would silently average across datasets."""
     rows = load_results(csv_path)
+    if dataset is not None:
+        rows = [r for r in rows if r.get("dataset", "") == dataset]
     series: dict[str, dict[int, list[float]]] = {}
     for r in rows:
         label = r["model"] if r.get("loss") in (None, "", "native") else f"{r['model']}[{r['loss']}]"
