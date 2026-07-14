@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -84,6 +85,23 @@ XJTU_DATASETS = ("XJTU-SY",)
 # Convention: standard condition-clustering preprocessing for FD002/FD004.
 CONDITION_SETTING_DECIMALS = (0, 2, 0)
 
+# XJTU-SY per-snapshot condition-indicator channels (h_ = horizontal axis,
+# v_ = vertical). Defined here (not in datasets/xjtu.py) so the per-dataset
+# sensor-column DEFAULTS below can live in config without an import cycle;
+# datasets/xjtu.py re-exports it and computes the features.
+XJTU_BASE_FEATURES = ("rms", "kurtosis", "skewness", "peak", "p2p",
+                      "crest", "impulse", "shape")
+XJTU_FEATURE_COLUMNS = [f"{ax}_{f}" for ax in ("h", "v") for f in XJTU_BASE_FEATURES]
+
+# Default sensor channels per dataset KIND, applied when config.sensor_columns is
+# left None -- switching datasets is one knob, no cryptic KeyError deep in
+# preprocessing (CHANGES.md §24). Values match the previously-required explicit
+# lists exactly, so resolved configs hash to the SAME cache keys as before.
+DEFAULT_SENSOR_COLUMNS = {
+    "cmapss": list(FD001_NONCONSTANT_SENSORS),
+    "xjtu": list(XJTU_FEATURE_COLUMNS),
+}
+
 
 @dataclass
 class Config:
@@ -136,8 +154,10 @@ class Config:
     # ---- windowing ---------------------------------------------------------
     window_size: int = 30  # baseline sliding-window length in cycles; community convention (Li et al. 2018)
     # Sensor channels fed to every model. Fixed a-priori list => no leakage (see
-    # FD001_NONCONSTANT_SENSORS above). Use ALL_COLUMNS[2:] for the full 24.
-    sensor_columns: list = field(default_factory=lambda: list(FD001_NONCONSTANT_SENSORS))
+    # FD001_NONCONSTANT_SENSORS above). None => the dataset kind's default
+    # (DEFAULT_SENSOR_COLUMNS), resolved in __post_init__ so switching datasets is
+    # one knob. C-MAPSS: use ALL_COLUMNS[2:] for the full 24 channels.
+    sensor_columns: Optional[list] = None
     # Left-pad FIXED test windows (baselines) shorter than window_size by repeating
     # the first cycle. The TSFM path does NOT use this: it feeds embed()'s native
     # variable-length input so short test histories are left-pad-MASKED internally
@@ -240,6 +260,16 @@ class Config:
             raise ValueError(
                 f"head_features must be one of {HEAD_FEATURE_CHOICES}, got {self.head_features!r}"
             )
+        # experiment_name lands in every result filename -- keep it path-safe.
+        if self.experiment_name and not re.fullmatch(r"[A-Za-z0-9._-]+", self.experiment_name):
+            raise ValueError(
+                f"experiment_name {self.experiment_name!r} must contain only letters, "
+                f"digits, '.', '_', '-' (it prefixes result filenames)")
+        # Resolve the dataset kind's default sensor channels (one-knob dataset
+        # switching, CHANGES.md §24). replace() re-runs this, so a dataset change
+        # with sensor_columns=None re-resolves for the new dataset.
+        if self.sensor_columns is None:
+            self.sensor_columns = list(DEFAULT_SENSOR_COLUMNS[self.dataset_kind()])
 
     # -- helpers -------------------------------------------------------------
     def replace(self, **kwargs) -> "Config":

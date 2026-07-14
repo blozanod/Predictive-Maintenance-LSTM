@@ -81,8 +81,11 @@ def plot_data_scaling(
 ) -> list[Path]:
     """The headline figure(s): metric vs. training units, mean +/- std over seeds.
 
-    One figure per metric in ``metrics`` (``(column, ylabel)`` pairs). Returns the
-    saved file paths.
+    One figure per (dataset, metric) -- results CSVs may hold several datasets
+    (dataset is part of the sweep cell key, CHANGES.md §21), and pooling their
+    rows into one curve per model would silently average across datasets. The
+    dataset tag joins the filename only when the CSV holds more than one.
+    Returns the saved file paths.
     """
     out_dir = Path(out_dir)
     metrics = metrics or [
@@ -90,42 +93,46 @@ def plot_data_scaling(
         ("rmse_unclipped", "test RMSE (unclipped protocol)"),
         ("nasa_clipped", "NASA score (clipped protocol)"),
     ]
+    all_rows = load_results(results_csv)
+    datasets = sorted({r.get("dataset", "") for r in all_rows})
     saved: list[Path] = []
-    for metric, ylabel in metrics:
-        agg = aggregate_data_scaling(results_csv, metric=metric)
-        log_y = metric.startswith("nasa")
-        fig, ax = plt.subplots(figsize=(7.5, 5))
-        lo, hi, all_ns = np.inf, -np.inf, set()
-        for label in sorted(agg):
-            ns, mean, std = agg[label]
-            all_ns.update(int(n) for n in ns)
-            family = label.split("[")[0]
-            if family in _FLOOR_STYLE:
-                floor_label, floor_ls = _FLOOR_STYLE[family]
-                ax.axhline(float(np.mean(mean)), color="#888888", ls=floor_ls,
-                           lw=1.2, label=floor_label)
-                continue
-            st = _series_style(label)
-            ax.plot(ns, mean, lw=2, ms=5, label=label, **st)
-            band_lo = np.maximum(mean - std, 1e-9) if log_y else mean - std
-            ax.fill_between(ns, band_lo, mean + std, color=st["color"], alpha=0.15, lw=0)
-            lo, hi = min(lo, band_lo.min()), max(hi, (mean + std).max())
-        if metric == "rmse_clipped" and sanity_gate:
-            ax.axhline(sanity_gate, color="#444444", ls="--", lw=1,
-                       label=f"sanity gate ({sanity_gate:g})")
-            hi = max(hi, sanity_gate)
-        _unit_count_xaxis(ax, all_ns)
-        if log_y:
-            ax.set_yscale("log")
-        else:
-            pad = 0.05 * (hi - lo)
-            ax.set_ylim(max(0.0, lo - pad), hi + pad)
-        ax.set_ylabel(ylabel)
-        ax.set_title(f"Data-scaling curve (FD001) — {ylabel}")
-        ax.grid(alpha=0.25)
-        ax.legend(fontsize=8, framealpha=0.9)
-        saved += _save(fig, out_dir, f"data_scaling_{metric}", prefix)
-        plt.show() if show else plt.close(fig)
+    for ds in datasets:
+        ds_tag = f"{ds}_" if len(datasets) > 1 and ds else ""
+        for metric, ylabel in metrics:
+            agg = aggregate_data_scaling(results_csv, metric=metric, dataset=ds)
+            log_y = metric.startswith("nasa")
+            fig, ax = plt.subplots(figsize=(7.5, 5))
+            lo, hi, all_ns = np.inf, -np.inf, set()
+            for label in sorted(agg):
+                ns, mean, std = agg[label]
+                all_ns.update(int(n) for n in ns)
+                family = label.split("[")[0]
+                if family in _FLOOR_STYLE:
+                    floor_label, floor_ls = _FLOOR_STYLE[family]
+                    ax.axhline(float(np.mean(mean)), color="#888888", ls=floor_ls,
+                               lw=1.2, label=floor_label)
+                    continue
+                st = _series_style(label)
+                ax.plot(ns, mean, lw=2, ms=5, label=label, **st)
+                band_lo = np.maximum(mean - std, 1e-9) if log_y else mean - std
+                ax.fill_between(ns, band_lo, mean + std, color=st["color"], alpha=0.15, lw=0)
+                lo, hi = min(lo, band_lo.min()), max(hi, (mean + std).max())
+            if metric == "rmse_clipped" and sanity_gate:
+                ax.axhline(sanity_gate, color="#444444", ls="--", lw=1,
+                           label=f"sanity gate ({sanity_gate:g})")
+                hi = max(hi, sanity_gate)
+            _unit_count_xaxis(ax, all_ns)
+            if log_y:
+                ax.set_yscale("log")
+            else:
+                pad = 0.05 * (hi - lo)
+                ax.set_ylim(max(0.0, lo - pad), hi + pad)
+            ax.set_ylabel(ylabel)
+            ax.set_title(f"Data-scaling curve ({ds or 'unknown dataset'}) — {ylabel}")
+            ax.grid(alpha=0.25)
+            ax.legend(fontsize=8, framealpha=0.9)
+            saved += _save(fig, out_dir, f"data_scaling_{ds_tag}{metric}", prefix)
+            plt.show() if show else plt.close(fig)
     return saved
 
 
