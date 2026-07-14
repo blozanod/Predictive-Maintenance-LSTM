@@ -26,8 +26,12 @@ Honesty rules:
     they would need a fitted scaler policy decision; add deliberately if needed.
   * Datasets must share ``sensor_columns`` and ``window_size`` (asserted). The
     default FD001<->FD003 pair is valid a-priori: both single-operating-condition,
-    same non-constant sensor set. FD002/FD004 additionally need condition-wise
-    normalization (plan §6) which is NOT implemented -- a loud warning is printed.
+    same non-constant sensor set. FD002/FD004 are supported through condition-wise
+    normalization (CHANGES.md §21), fit PER DATASET on its own train split --
+    legitimate for day-one deployment because condition statistics need no failure
+    labels, only operating sensor data the target plant already has. A warning is
+    printed only if a multi-condition dataset is run with the normalization
+    explicitly disabled.
   * Shot counts must be >= 2 (a k=1 arm has no unit left for the validation split).
 """
 
@@ -38,7 +42,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .config import Config
+from .config import Config, MULTI_CONDITION_DATASETS
 from . import data as data_mod
 from . import train as train_mod
 from . import baselines as baselines_mod
@@ -48,8 +52,8 @@ from .evaluate import (
     RESULTS_SCHEMA_VERSION,
 )
 
-TRANSFER_KEYS = ["model", "mode", "n_target_units", "seed", "loss"]
-MULTI_CONDITION_DATASETS = ("FD002", "FD004")
+TRANSFER_KEYS = ["model", "mode", "source_dataset", "target_dataset",
+                 "n_target_units", "seed", "loss"]  # pair in the key: multi-pair CSVs (§21)
 
 
 def _transfer_row(config: Config, model: str, mode: str, source: str, target: str,
@@ -98,14 +102,13 @@ def run_transfer_eval(
     run_dir = Path(config.results_dir) / "transfer_runs"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    for ds in (source_dataset, target_dataset):
-        if ds in MULTI_CONDITION_DATASETS:
-            print(f"WARNING: {ds} has multiple operating conditions; condition-wise "
-                  f"normalization (plan §6) is NOT implemented -- treat these "
-                  f"transfer numbers as exploratory only.")
-
     src_cfg = config.replace(dataset=source_dataset)
     tgt_cfg = config.replace(dataset=target_dataset)
+    for cfg in (src_cfg, tgt_cfg):
+        if cfg.dataset in MULTI_CONDITION_DATASETS and not cfg.effective_condition_norm():
+            print(f"WARNING: {cfg.dataset} has multiple operating conditions but "
+                  f"condition-wise normalization is explicitly disabled -- treat "
+                  f"these transfer numbers as exploratory only.")
     save_run_metadata(tgt_cfg, run_dir / "run_metadata.json")
     for cfg in (src_cfg, tgt_cfg):
         emb = embedder_factory(cfg) if embedder_factory is not None else None
@@ -165,7 +168,7 @@ def run_transfer_eval(
     def _emit(model: str, mode: str, k: int, seed: int, loss: str, pred: np.ndarray):
         append_result_row(out_csv, _transfer_row(
             config, model, mode, source_dataset, target_dataset, k, seed, loss, te_y, pred))
-        done.add((model, mode, str(k), str(seed), loss))
+        done.add((model, mode, source_dataset, target_dataset, str(k), str(seed), loss))
 
     for seed in seeds:
         s_tr_u, s_va_u = data_mod.unit_train_val_split(src_units, config.val_fraction, seed)
@@ -174,11 +177,11 @@ def run_transfer_eval(
 
         # ---- zero-shot: source-only training, target test ----
         for loss in losses:
-            if (model_tag, "zero_shot", "0", str(seed), loss) not in done:
+            if (model_tag, "zero_shot", source_dataset, target_dataset, "0", str(seed), loss) not in done:
                 _emit(model_tag, "zero_shot", 0, seed, loss,
                       _train_predict_head(loss, seed, [s_head]))
         for bname in baseline_names:
-            if (bname, "zero_shot", "0", str(seed), "native") not in done:
+            if (bname, "zero_shot", source_dataset, target_dataset, "0", str(seed), "native") not in done:
                 _emit(bname, "zero_shot", 0, seed, "native",
                       _baseline_predict(bname, seed, [s_win]))
 
@@ -191,17 +194,17 @@ def run_transfer_eval(
             t_head = (tgt, _idx(tgt, t_tr_u), _idx(tgt, t_va_u))
             t_win = (tgt_win, np.isin(tgt_win["u"], t_tr_u), np.isin(tgt_win["u"], t_va_u))
             for loss in losses:
-                if (model_tag, "target_only", str(k), str(seed), loss) not in done:
+                if (model_tag, "target_only", source_dataset, target_dataset, str(k), str(seed), loss) not in done:
                     _emit(model_tag, "target_only", k, seed, loss,
                           _train_predict_head(loss, seed, [t_head]))
-                if (model_tag, "source+target", str(k), str(seed), loss) not in done:
+                if (model_tag, "source+target", source_dataset, target_dataset, str(k), str(seed), loss) not in done:
                     _emit(model_tag, "source+target", k, seed, loss,
                           _train_predict_head(loss, seed, [s_head, t_head]))
             for bname in baseline_names:
-                if (bname, "target_only", str(k), str(seed), "native") not in done:
+                if (bname, "target_only", source_dataset, target_dataset, str(k), str(seed), "native") not in done:
                     _emit(bname, "target_only", k, seed, "native",
                           _baseline_predict(bname, seed, [t_win]))
-                if (bname, "source+target", str(k), str(seed), "native") not in done:
+                if (bname, "source+target", source_dataset, target_dataset, str(k), str(seed), "native") not in done:
                     _emit(bname, "source+target", k, seed, "native",
                           _baseline_predict(bname, seed, [s_win, t_win]))
     return out_csv

@@ -298,10 +298,87 @@ gap to the TSFM, the long-context advantage was age, not representation — that
 the honest test the caveat demanded. `run_baseline_window_comparison` (§14) is
 now wired into the notebook (§4b) at windows {30, 60, 120}.
 
+## 20. Horizon file-sync guard (bugfix)
+`horizon.csv` (metrics) and `horizon_predictions.csv` (per-cycle predictions) are
+two append-only files written together per cell but formerly gated on `horizon.csv`
+alone. Archiving/deleting only ONE (e.g. the §18 note said to archive
+`horizon_predictions.csv` before rerunning, but not `horizon.csv`) desynced them:
+the kept `horizon.csv` marked seeds 0-2 "done", so those cells were skipped and
+never re-emitted predictions, leaving `horizon_predictions.csv` with only the newly
+run seeds. `plot_horizon_trajectories`'s default `seed=0` then found zero rows and
+matplotlib raised the opaque "Number of columns must be a positive integer, not 0".
+
+Two fixes:
+- `run_horizon_eval` now gates skips on BOTH files (`done = metrics ∩ predictions`)
+  and, if `horizon.csv` has cells whose predictions are missing, raises a clear
+  error naming the desync and the remedy (archive/delete BOTH together) instead of
+  silently producing an incomplete predictions file.
+- `plot_horizon_trajectories` selects an AVAILABLE `(n_units, seed)` from the file
+  rather than assuming `seed=0`/max exist; if the requested seed is absent it falls
+  back to a present one with a printed note, and raises a clear message only when a
+  unit count is genuinely absent.
+
+## 21. Multi-dataset support: condition-wise normalization + one loading path
+The breadth arm (plan §7 Phase 4) starts here. Changes:
+- **One loading path.** `data.load_prepared(config)` is now the ONLY way any
+  pipeline stage (Stage A caches, horizon cache, baselines, window comparison,
+  fairness arms) obtains data: it loads the dataset, attaches RUL labels, and
+  applies condition-wise normalization when resolved ON — no stage can disagree
+  about preprocessing.
+- **Condition-wise normalization (plan §6).** Rows are grouped by their discrete
+  operating point — the 3 settings snapped onto their grid
+  (`CONDITION_SETTING_DECIMALS` = (0, 2, 0) decimals) — and each sensor channel is
+  z-normalized per condition. The scaler is keyed by the setting VALUES, not
+  per-frame ranks, so train/test rows at the same operating point always share
+  statistics even if one frame is missing a condition; unseen test conditions
+  fall back to global train stats. Channels flat within a condition get std=1
+  (they normalize to ~0; this is why the FD001 14-sensor list stays valid for
+  FD002/FD004 — the 7 dropped sensors move only WITH the condition).
+- **`condition_norm` config flag**, None ⇒ auto: ON for FD002/FD004 and XJTU-SY,
+  OFF for FD001/FD003 (all earlier FD001 numbers remain produced by byte-identical
+  preprocessing). Part of the cache key: **adding the field invalidates every
+  pre-§21 Stage A cache** (one re-embed per dataset on first run after this).
+- **Deliberate deviation:** normalization statistics are fit ONCE on the full
+  train split, not per data fraction (plan §6 strictly read). Per-fraction stats
+  would make the embedding cache fraction-dependent (~6× the Stage A GPU cost).
+  Condition statistics are properties of the operating points (no labels
+  involved), so the residual leakage is limited to sensor means/stds across
+  train units — accepted and recorded. Test statistics are never used.
+- **Multi-dataset restart keys.** `dataset` joined `CELL_KEYS`, `ABLATION_KEYS`,
+  `HORIZON_KEYS`, the window-comparison keys, and the horizon predictions schema;
+  `TRANSFER_KEYS` gained (source_dataset, target_dataset). Without this,
+  switching `config.dataset` against the same CSVs marked every cell of the new
+  dataset "done". Old metric CSVs already carry these columns and keep working;
+  a pre-§21 `horizon_predictions.csv` (no `dataset` column) trips the §18 schema
+  guard — archive it. Multi-dataset figures: `plot_horizon` emits one figure per
+  (dataset, cap, n_units); `plot_horizon_trajectories` requires a `dataset=`
+  selection when the predictions file mixes datasets (unit IDs collide).
+
+## 22. XJTU-SY bearing loader (src/xjtu.py) — the non-CMAPSS stress test
+Adapts the XJTU-SY run-to-failure bearing dataset (15 bearings, 3 operating
+conditions, 25.6 kHz vibration snapshots once per minute; download:
+https://biaowang.tech/xjtu-sy-bearing-datasets/) into the SAME canonical frame
+C-MAPSS uses, so every downstream stage runs unchanged. Decisions (all
+`DECISION (uncited)` — no community-standard protocol exists for XJTU RUL):
+- One "cycle" = one 1-minute snapshot; one "unit" = one bearing; "sensors" =
+  8 classic time-domain condition indicators per axis (`XJTU_FEATURE_COLUMNS`,
+  16 channels: rms, kurtosis, skewness, peak, p2p, crest, impulse, shape),
+  computed per snapshot — the standard indicator-trend formulation, not the raw
+  waveform.
+- `setting_1..3` = condition index / speed / radial force, so §21's condition
+  normalization groups by operating condition exactly as for FD002/FD004
+  (auto-ON).
+- Split protocol: fixed held-out test bearings (`xjtu_test_bearings`, default
+  the last 2 of 5 per condition) truncated at `xjtu_test_truncation` (default
+  0.6) of life, mimicking the C-MAPSS "predict at last observed cycle" protocol;
+  provided RUL = remaining minutes. Both fields are part of the cache key.
+- `max_rul` is in MINUTES here; the FD-convention 125 is arbitrary for bearings
+  (lifetimes span ~35 min to ~42 h) — choose per experiment and record it.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
-FD002–FD004 & N-CMAPSS/bearings; TimesFM/MOMENT/TTM/Moirai (the `model_name`
-string + `Embedder` protocol are the slot-in points); condition-wise normalization
-for multi-condition datasets; experiment-tracking services; CLI frameworks. No
-result numbers, comparisons, or conclusions are written anywhere (Task 2.5) — the
-ablation winner and sanity-gate outcome (§12) are placeholders to fill after the
-Colab run, not fabricated.
+N-CMAPSS (download located — see RESEARCH_PLAN §3 note — but the 20+ GB h5
+loader/downsampling design is its own task); TimesFM/MOMENT/TTM/Moirai (the
+`model_name` string + `Embedder` protocol are the slot-in points);
+experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
+conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only
+from completed runs.

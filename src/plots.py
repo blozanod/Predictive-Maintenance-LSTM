@@ -201,10 +201,12 @@ def plot_horizon(
     rows = load_results(horizon_csv)
     rows = [r for r in rows if str(r.get("bin_lo")) != "all"]
     saved: list[Path] = []
-    arms = sorted({(int(float(r["max_rul"])), r["n_units"]) for r in rows})
-    for max_rul, n_units in arms:
+    arms = sorted({(r.get("dataset", ""), int(float(r["max_rul"])), r["n_units"])
+                   for r in rows})
+    for ds, max_rul, n_units in arms:
         sub = [r for r in rows
-               if r["n_units"] == n_units and int(float(r["max_rul"])) == max_rul]
+               if r["n_units"] == n_units and int(float(r["max_rul"])) == max_rul
+               and r.get("dataset", "") == ds]
         bins = sorted({(float(r["bin_lo"]),
                         float("inf") if str(r["bin_hi"]) == "inf" else float(r["bin_hi"]))
                        for r in sub})
@@ -245,8 +247,8 @@ def plot_horizon(
         ax_bias.axhline(0, color="#444444", lw=1)
         ax_mae.legend(fontsize=8, framealpha=0.9)
         fig.suptitle(f"Error vs. prediction horizon "
-                     f"(trained on {n_units} units, label cap {max_rul})")
-        saved += _save(fig, out_dir, f"horizon_mr{max_rul}_n{n_units}")
+                     f"({ds}, trained on {n_units} units, label cap {max_rul})")
+        saved += _save(fig, out_dir, f"horizon_{ds}_mr{max_rul}_n{n_units}")
         plt.show() if show else plt.close(fig)
     return saved
 
@@ -259,6 +261,7 @@ def plot_horizon_trajectories(
     seed: int = 0,
     max_units_shown: int = 4,
     max_rul: Optional[float] = None,
+    dataset: Optional[str] = None,
     show: bool = True,
 ) -> list[Path]:
     """Predicted vs. true RUL along a few test-unit trajectories (the qualitative
@@ -272,10 +275,19 @@ def plot_horizon_trajectories(
     with open(preds_csv, newline="") as f:
         for r in _csv.DictReader(f):
             rows.append({"model": r["model"], "loss": r["loss"],
+                         "dataset": r.get("dataset"),
                          "max_rul": float(r["max_rul"]) if r.get("max_rul") else None,
                          "n_units": int(r["n_units"]), "seed": int(r["seed"]),
                          "unit": int(r["unit"]), "true": float(r["true_rul"]),
                          "pred": float(r["pred"])})
+    datasets = sorted({r["dataset"] for r in rows if r["dataset"] is not None})
+    if dataset is not None and datasets:
+        rows = [r for r in rows if r["dataset"] == dataset]
+        if not rows:
+            raise ValueError(f"no rows for dataset={dataset}; file has {datasets}")
+    elif len(datasets) > 1:
+        raise ValueError(f"predictions file mixes datasets {datasets}; pass "
+                         f"dataset= to select one (unit IDs collide across datasets)")
     caps = sorted({r["max_rul"] for r in rows if r["max_rul"] is not None})
     if max_rul is not None and caps:
         rows = [r for r in rows if r["max_rul"] == float(max_rul)]
@@ -284,8 +296,27 @@ def plot_horizon_trajectories(
     elif len(caps) > 1:
         raise ValueError(f"predictions file mixes label caps {caps}; pass max_rul= "
                          f"to select one arm")
+    # Pick an AVAILABLE (n_units, seed) instead of assuming seed 0 / max exist.
+    # horizon_predictions.csv only carries cells the run actually (re)emitted, so a
+    # restart that skipped "done" cells (e.g. horizon.csv kept but predictions
+    # archived) may lack seed 0 -- fall back with a note rather than crashing.
+    avail_units = sorted({r["n_units"] for r in rows})
     if n_units is None:
-        n_units = max(r["n_units"] for r in rows)
+        n_units = max(avail_units)
+    elif n_units not in avail_units:
+        raise ValueError(f"no predictions for n_units={n_units}; file has "
+                         f"{avail_units}. Rerun the horizon eval for that unit count.")
+    seeds_here = sorted({r["seed"] for r in rows if r["n_units"] == n_units})
+    if not seeds_here:
+        raise ValueError(f"no prediction rows for n_units={n_units}.")
+    if seed not in seeds_here:
+        alt = seeds_here[0]
+        print(f"[plot_horizon_trajectories] seed {seed} absent for n_units="
+              f"{n_units} (present: {seeds_here}); using seed {alt}. This usually "
+              f"means the horizon run skipped seed {seed} as already-done while its "
+              f"predictions were archived -- archive horizon.csv and "
+              f"horizon_predictions.csv TOGETHER, or rerun to regenerate all seeds.")
+        seed = alt
     rows = [r for r in rows if r["n_units"] == n_units and r["seed"] == seed]
     arms = sorted({(r["model"], r["loss"]) for r in rows})
     if models:
@@ -324,8 +355,10 @@ def plot_horizon_trajectories(
     axes[0][0].set_ylabel("RUL (cycles)")
     axes[0][0].legend(fontsize=8, framealpha=0.9)
     fig.suptitle(f"Prediction trajectories (trained on {n_units} units, seed {seed})")
+    ds_tag = f"_{dataset}" if dataset else (f"_{datasets[0]}" if datasets else "")
     cap_tag = f"_mr{int(max_rul)}" if max_rul is not None else ""
-    saved = _save(fig, out_dir, f"horizon_trajectories{cap_tag}_n{n_units}_seed{seed}")
+    saved = _save(fig, out_dir,
+                  f"horizon_trajectories{ds_tag}{cap_tag}_n{n_units}_seed{seed}")
     plt.show() if show else plt.close(fig)
     return saved
 

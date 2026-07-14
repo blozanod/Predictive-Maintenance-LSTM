@@ -45,7 +45,7 @@ from .evaluate import (
 
 # max_rul is a cell key so the label-cap arms (e.g. 125 vs 200, CHANGES.md §18)
 # can share one horizon.csv without colliding on restart.
-HORIZON_KEYS = ["model", "max_rul", "n_units", "seed", "loss"]
+HORIZON_KEYS = ["model", "dataset", "max_rul", "n_units", "seed", "loss"]
 DEFAULT_BIN_EDGES = (0.0, 25.0, 50.0, 75.0, 100.0, 125.0, float("inf"))
 
 
@@ -84,8 +84,7 @@ def build_horizon_cache(
     if cache_path.exists() and not overwrite:
         return cache_path
 
-    _, df_test, rul_truth = data_mod.load_cmapss(config)
-    df_test = data_mod.add_test_rul(df_test, rul_truth, config)
+    _, df_test = data_mod.load_prepared(config)
     ws, tsfm_ctx, cols = config.window_size, config.effective_tsfm_context(), config.sensor_columns
 
     te_w, te_y, te_u = data_mod.make_windows(df_test, cols, ws, target_col="actual_rul")
@@ -213,8 +212,8 @@ def run_horizon_eval(
         "schema_version", "model", "n_units", "seed", "loss", "dataset", "max_rul",
         "window_size", "tsfm_context_length", "head_features", "pooling",
         *_metric_fields])
-    ensure_csv_schema(preds_csv, ["model", "max_rul", "n_units", "seed", "loss",
-                                  "unit", "true_rul", "pred"])
+    ensure_csv_schema(preds_csv, ["model", "dataset", "max_rul", "n_units", "seed",
+                                  "loss", "unit", "true_rul", "pred"])
 
     dc = _to_device_cache(cache, device)     # train side on device
     t = lambda a: torch.as_tensor(np.asarray(a, np.float32), device=device)
@@ -225,7 +224,22 @@ def run_horizon_eval(
 
     all_units = np.unique(dc["tr_u"])
     n_units_list = n_units_list if n_units_list is not None else [len(all_units)]
-    done = completed_cells(out_csv, HORIZON_KEYS)
+    # A cell is only skippable if BOTH its metrics (out_csv) and its predictions
+    # (preds_csv) already exist. Gating on out_csv alone desyncs the two files: if
+    # horizon.csv is kept but horizon_predictions.csv is deleted/archived, the
+    # skipped cells never re-emit predictions, and trajectory plots for those seeds
+    # break. Re-emitting a cell present in metrics-only would DUPLICATE metric rows,
+    # so that state is a hard error with a clear remedy instead.
+    done_metrics = completed_cells(out_csv, HORIZON_KEYS)
+    done_preds = completed_cells(preds_csv, HORIZON_KEYS)
+    orphan = done_metrics - done_preds
+    if orphan:
+        raise ValueError(
+            f"{out_csv.name} has {len(orphan)} cell(s) whose predictions are missing "
+            f"from {preds_csv.name} (e.g. {sorted(orphan)[0]}). The two files are out "
+            f"of sync -- archive/delete BOTH together (not just one) and rerun, so "
+            f"metrics and per-cycle predictions regenerate for the same cells.")
+    done = done_metrics & done_preds
 
     def _emit(model_name: str, n_units: int, seed: int, loss: str, pred: np.ndarray):
         for bin_row in horizon_bin_rows(h_y, pred, config.max_rul, bin_edges):
@@ -240,7 +254,8 @@ def run_horizon_eval(
             })
         for unit, yt, yp in zip(h_u, h_y, pred):
             append_result_row(preds_csv, {
-                "model": model_name, "max_rul": config.max_rul,
+                "model": model_name, "dataset": config.dataset,
+                "max_rul": config.max_rul,
                 "n_units": int(n_units), "seed": int(seed),
                 "loss": loss, "unit": int(unit),
                 "true_rul": float(yt), "pred": float(yp)})
@@ -261,7 +276,7 @@ def run_horizon_eval(
             Xva = builder.transform(dc["tr_emb"][va_i], dc["tr_ls"][va_i], dc["tr_raw"][va_i])
             Xh = builder.transform(h_emb, h_ls, h_raw)
             for loss in losses:
-                key = (model_tag, str(config.max_rul), str(n_units), str(seed), loss)
+                key = (model_tag, config.dataset, str(config.max_rul), str(n_units), str(seed), loss)
                 if key in done:
                     continue
                 model, _ = train_mod.train_head(
@@ -274,7 +289,7 @@ def run_horizon_eval(
             # ---- baselines on the fixed windows (window_size only) ----
             tr_w, tr_y = cache["train_windows"], cache["train_labels"]
             for bname in baseline_names:
-                key = (bname, str(config.max_rul), str(n_units), str(seed), "native")
+                key = (bname, config.dataset, str(config.max_rul), str(n_units), str(seed), "native")
                 if key in done:
                     continue
                 bl = baselines_mod.make_baseline(bname, config, seed=seed)

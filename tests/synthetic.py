@@ -15,6 +15,15 @@ import numpy as np
 from src.config import ALL_COLUMNS
 
 
+# Discrete operating points used when n_conditions > 1 (recoverable by the
+# per-column rounding in ``data.condition_keys``: 0 / 2 / 0 decimals).
+_COND_SETTINGS = np.array([[0.0, 0.25, 100.0], [10.0, 0.70, 60.0],
+                           [20.0, 0.84, 40.0], [35.0, 0.62, 80.0]])
+# Large per-condition sensor offsets: regime switching dominates raw variance,
+# burying the degradation trend until condition-wise normalization removes it.
+_COND_OFFSET_SCALE = 60.0
+
+
 def write_synthetic_cmapss(
     data_dir: Path,
     dataset: str = "FD001",
@@ -23,26 +32,37 @@ def write_synthetic_cmapss(
     min_cycles: int = 20,
     max_cycles: int = 45,
     seed: int = 0,
+    n_conditions: int = 1,
 ) -> None:
     """Write train_{ds}.txt, test_{ds}.txt, RUL_{ds}.txt into ``data_dir``.
 
     Sensors are a degradation trend + noise so there is learnable signal; a couple
-    of test units are deliberately short to exercise left-padding.
+    of test units are deliberately short to exercise left-padding. With
+    ``n_conditions > 1`` each cycle randomly draws one of ``_COND_SETTINGS`` and a
+    large condition-dependent sensor offset (the FD002/FD004 shape).
     """
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
+    cond_offsets = rng.normal(0, _COND_OFFSET_SCALE, size=(max(n_conditions, 1), 21))
 
     def unit_rows(unit_id, n_cycles):
         rows = np.zeros((n_cycles, len(ALL_COLUMNS)), dtype=np.float64)
         rows[:, 0] = unit_id
         rows[:, 1] = np.arange(1, n_cycles + 1)
-        rows[:, 2:5] = rng.normal(0, 0.001, size=(n_cycles, 3))  # settings ~const
         frac = np.linspace(0, 1, n_cycles)[:, None]
         base = rng.normal(500, 5, size=(1, 21))
         trend = rng.normal(0, 20, size=(1, 21)) * frac  # degradation trend
         noise = rng.normal(0, 1, size=(n_cycles, 21))
         rows[:, 5:26] = base + trend + noise
+        if n_conditions <= 1:
+            rows[:, 2:5] = rng.normal(0, 0.001, size=(n_cycles, 3))  # settings ~const
+        else:
+            cond = rng.integers(0, n_conditions, size=n_cycles)
+            # settings wobble stays below condition_keys' rounding resolution
+            rows[:, 2:5] = (_COND_SETTINGS[cond]
+                            + rng.normal(0, [0.05, 0.001, 0.05], size=(n_cycles, 3)))
+            rows[:, 5:26] += cond_offsets[cond]
         return rows
 
     # ---- train: full run-to-failure ----
@@ -112,3 +132,35 @@ class MockEmbedder:
 
     def describe(self) -> dict:
         return {"embedder": "MockEmbedder", "feature_dim": self.feature_dim, "seed": self.seed}
+
+
+def write_synthetic_xjtu(
+    root: Path,
+    bearings_per_condition: int = 5,
+    min_snapshots: int = 18,
+    max_snapshots: int = 40,
+    samples_per_snapshot: int = 256,
+    seed: int = 0,
+) -> None:
+    """Write a miniature XJTU-SY directory tree (src/xjtu.py layout): 3 condition
+    folders x N ``BearingC_B`` folders x one 2-column CSV per minute. Vibration
+    amplitude grows toward failure so the extracted indicators carry RUL signal."""
+    from src.xjtu import XJTU_CONDITIONS
+
+    root = Path(root)
+    rng = np.random.default_rng(seed)
+    for cond_name, (cond_idx, _, _) in XJTU_CONDITIONS.items():
+        for b in range(1, bearings_per_condition + 1):
+            bdir = root / cond_name / f"Bearing{cond_idx + 1}_{b}"
+            bdir.mkdir(parents=True, exist_ok=True)
+            n_snap = int(rng.integers(min_snapshots, max_snapshots + 1))
+            for i in range(1, n_snap + 1):
+                frac = i / n_snap
+                amp = 0.5 + 3.0 * frac ** 2          # degradation: growing energy
+                x = rng.normal(0, amp, size=(samples_per_snapshot, 2))
+                if frac > 0.7:                        # late-life impulsiveness
+                    spikes = rng.integers(0, samples_per_snapshot, size=5)
+                    x[spikes] += rng.normal(0, 6 * amp, size=(5, 2))
+                header = "Horizontal_vibration_signals,Vertical_vibration_signals"
+                np.savetxt(bdir / f"{i}.csv", x, delimiter=",", header=header,
+                           comments="", fmt="%.5f")

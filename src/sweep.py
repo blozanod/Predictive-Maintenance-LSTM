@@ -35,8 +35,8 @@ from .evaluate import (
 
 # Completed-cell keys. The main sweep is one config per file, so the config axes are
 # constant and need not key cells; the ablation varies them, so it keys on them.
-CELL_KEYS = ["model", "n_units", "seed", "loss"]
-ABLATION_KEYS = ["model", "tsfm_context_length", "head_features", "pooling", "seed", "loss"]
+CELL_KEYS = ["model", "dataset", "n_units", "seed", "loss"]  # dataset: multi-dataset CSVs (§21)
+ABLATION_KEYS = ["model", "dataset", "tsfm_context_length", "head_features", "pooling", "seed", "loss"]
 
 
 # ---------------------------------------------------------------------------
@@ -122,9 +122,7 @@ def _baseline_window_sets(config: Config, cache: dict,
     }
     override_sizes = [s for s in sizes if s != base]
     if override_sizes:
-        df_train, df_test, rul = data_mod.load_cmapss(config)
-        df_train = data_mod.add_train_rul(df_train, config)
-        df_test = data_mod.add_test_rul(df_test, rul, config)
+        df_train, df_test = data_mod.load_prepared(config)
         cols = config.sensor_columns
         for s in override_sizes:
             tr_w, tr_y, tr_u = data_mod.make_windows(df_train, cols, s, target_col="clipped_rul")
@@ -196,7 +194,7 @@ def run_sweep(
 
             # ---- TSFM MLP head, one arm per loss (cached embeddings only) ----
             for loss in losses:
-                key = (model_tag, str(n_units), str(seed), loss)
+                key = (model_tag, config.dataset, str(n_units), str(seed), loss)
                 if key in done:
                     continue
                 curve = curves_dir / f"{model_tag}_n{n_units}_seed{seed}_{loss}.csv"
@@ -207,7 +205,7 @@ def run_sweep(
 
             # ---- baselines on cached (or override-windowed) raw windows ----
             for bname in baseline_names:
-                key = (bname, str(n_units), str(seed), "native")
+                key = (bname, config.dataset, str(n_units), str(seed), "native")
                 if key in done:
                     continue
                 ws = config.baseline_windows.get(bname, config.window_size)
@@ -276,8 +274,8 @@ def run_ablation(
         all_units = np.unique(tr_u)
         nu = _n_units(cache)
         for seed in seeds:
-            key = (model_tag, str(cfg.effective_tsfm_context()), cfg.head_features,
-                   cfg.pooling, str(seed), "mse")
+            key = (model_tag, cfg.dataset, str(cfg.effective_tsfm_context()),
+                   cfg.head_features, cfg.pooling, str(seed), "mse")
             if key in done:
                 continue
             sampled = data_mod.subsample_units(all_units, nu, seed)
@@ -358,11 +356,9 @@ def run_baseline_window_comparison(
     seeds = seeds or [0, 1, 2]
     out_csv = Path(out_csv) if out_csv else Path(config.results_dir) / "baseline_window_comparison.csv"
 
-    df_train, df_test, rul = data_mod.load_cmapss(config)
-    df_train = data_mod.add_train_rul(df_train, config)
-    df_test = data_mod.add_test_rul(df_test, rul, config)
+    df_train, df_test = data_mod.load_prepared(config)
     cols = config.sensor_columns
-    done = completed_cells(out_csv, ["model", "baseline_window", "seed"])
+    done = completed_cells(out_csv, ["model", "dataset", "baseline_window", "seed"])
 
     for ws in windows:
         tr_w, tr_y, tr_u = data_mod.make_windows(df_train, cols, ws, target_col="clipped_rul")
@@ -373,14 +369,14 @@ def run_baseline_window_comparison(
             train_u, val_u = data_mod.unit_train_val_split(all_units, config.val_fraction, seed)
             tr_mask, va_mask = np.isin(tr_u, train_u), np.isin(tr_u, val_u)
             for bname in baseline_names:
-                if (bname, str(ws), str(seed)) in done:
+                if (bname, config.dataset, str(ws), str(seed)) in done:
                     continue
                 bl = baselines_mod.make_baseline(bname, config, seed=seed)
                 bl.fit(tr_w[tr_mask], tr_y[tr_mask], tr_w[va_mask], tr_y[va_mask])
                 pred = bl.predict(te_w)
                 append_result_row(out_csv, _row(config, bname, len(all_units), seed, "native",
                                                 te_y, pred, baseline_window=ws))
-                done.add((bname, str(ws), str(seed)))
+                done.add((bname, config.dataset, str(ws), str(seed)))
     return out_csv
 
 
@@ -412,9 +408,7 @@ def run_fairness_baselines(
     results_csv = Path(results_csv) if results_csv else Path(config.results_dir) / "results_v2.csv"
     seeds = seeds if seeds is not None else list(config.sweep_seeds)
 
-    df_train, df_test, rul = data_mod.load_cmapss(config)
-    df_train = data_mod.add_train_rul(df_train, config)
-    df_test = data_mod.add_test_rul(df_test, rul, config)
+    df_train, df_test = data_mod.load_prepared(config)
     ws = config.window_size
     age_cols = ["time_cycles"] + list(config.sensor_columns)
     tr_w, tr_y, tr_u = data_mod.make_windows(df_train, age_cols, ws, target_col="clipped_rul")
@@ -434,18 +428,18 @@ def run_fairness_baselines(
             train_u, val_u = data_mod.unit_train_val_split(sampled, config.val_fraction, seed)
             tr_mask, va_mask = np.isin(tr_u, train_u), np.isin(tr_u, val_u)
 
-            if ("cycle_reg", str(n_units), str(seed), "native") not in done:
+            if ("cycle_reg", config.dataset, str(n_units), str(seed), "native") not in done:
                 slope, intercept = np.polyfit(tr_age[tr_mask], tr_y[tr_mask], 1)
                 pred = np.clip(slope * te_age + intercept, 0.0, float(config.max_rul))
                 append_result_row(results_csv, _row(config, "cycle_reg", len(sampled), seed,
                                                     "native", te_y, pred, baseline_window=ws))
-                done.add(("cycle_reg", str(n_units), str(seed), "native"))
+                done.add(("cycle_reg", config.dataset, str(n_units), str(seed), "native"))
 
-            if ("gbm_age", str(n_units), str(seed), "native") not in done:
+            if ("gbm_age", config.dataset, str(n_units), str(seed), "native") not in done:
                 bl = baselines_mod.make_baseline("gbm", config, seed=seed)
                 bl.fit(tr_w[tr_mask], tr_y[tr_mask], tr_w[va_mask], tr_y[va_mask])
                 pred = bl.predict(te_w)
                 append_result_row(results_csv, _row(config, "gbm_age", len(sampled), seed,
                                                     "native", te_y, pred, baseline_window=ws))
-                done.add(("gbm_age", str(n_units), str(seed), "native"))
+                done.add(("gbm_age", config.dataset, str(n_units), str(seed), "native"))
     return results_csv

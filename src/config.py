@@ -57,10 +57,32 @@ POOLING_CHOICES = ("forecast_token", "last_content", "mean", "flatten")
 # sensor set, NOT fit on any data split), so using it introduces no train/val/
 # test leakage and keeps embeddings cacheable in one pass.
 # Convention: Li et al. 2018 (arXiv:1806.09347), Heimes 2008.
+# The SAME list is retained for FD002/FD004 under condition-wise normalization:
+# those 7 sensors are flat WITHIN each operating condition too (they only move
+# with the condition itself), so after per-condition normalization they carry no
+# signal -- an a-priori property of the sensor suite, not a fitted selection
+# (CHANGES.md §21).
 FD001_NONCONSTANT_SENSORS = [
     "s_2", "s_3", "s_4", "s_7", "s_8", "s_9",
     "s_11", "s_12", "s_13", "s_14", "s_15", "s_17", "s_20", "s_21",
 ]
+
+# C-MAPSS datasets with multiple discrete operating conditions (6 combinations of
+# altitude/Mach/TRA). These REQUIRE condition-wise normalization (plan §6):
+# without it, regime switching dominates the sensor variance and buries the
+# degradation trend. FD001/FD003 are single-condition.
+MULTI_CONDITION_DATASETS = ("FD002", "FD004")
+
+# Datasets served by the XJTU-SY bearing loader (src/xjtu.py). Run-to-failure
+# vibration, 15 bearings under 3 operating conditions -- the natural extreme-
+# low-data domain (plan §3). "Cycles" are 1-minute snapshots.
+XJTU_DATASETS = ("XJTU-SY",)
+
+# Rounding (decimals per setting column) used to snap the 3 operational settings
+# onto their discrete condition grid before grouping: altitude wobbles ~0.008
+# around {0,10,20,25,35,42}K ft, Mach ~0.001 around {0..0.84}, TRA is {20..100}.
+# Convention: standard condition-clustering preprocessing for FD002/FD004.
+CONDITION_SETTING_DECIMALS = (0, 2, 0)
 
 
 @dataclass
@@ -73,8 +95,29 @@ class Config:
     deterministic: bool = True  # torch deterministic algorithms where feasible (Task 2.3)
 
     # ---- dataset -----------------------------------------------------------
-    dataset: str = "FD001"  # Phase 1 scope is FD001; FD002-004 slot in later (Task 2.6)
+    # C-MAPSS "FD001".."FD004" (data_dir = CMAPSSData) or "XJTU-SY" bearings
+    # (data_dir = the XJTU-SY root containing the 3 condition folders; see
+    # src/xjtu.py for layout, feature channels, and the split protocol).
+    dataset: str = "FD001"
     data_dir: str = "CMAPSSData"
+    # Condition-wise normalization (plan §6): per-condition z-normalization of the
+    # sensor channels, statistics fit on the TRAIN split (all units, once -- the
+    # cache-economics deviation is documented in CHANGES.md §21). None => auto:
+    # ON for multi-condition datasets (FD002/FD004, XJTU-SY), OFF for FD001/FD003
+    # (which keeps every earlier FD001 result byte-identical). Part of the cache
+    # key -- toggling it re-embeds.
+    condition_norm: Optional[bool] = None
+
+    # ---- XJTU-SY split protocol (ignored for C-MAPSS; CHANGES.md §22) --------
+    # Held-out test bearings (2 of 5 per condition) and the life fraction at
+    # which each test bearing's series is truncated to mimic the C-MAPSS
+    # "predict at last observed cycle" protocol. DECISION (uncited): no
+    # community-standard split exists for XJTU-SY; this fixed, documented choice
+    # keeps the protocol deterministic and unit-disjoint.
+    xjtu_test_bearings: list = field(default_factory=lambda: [
+        "Bearing1_4", "Bearing1_5", "Bearing2_4", "Bearing2_5",
+        "Bearing3_4", "Bearing3_5"])
+    xjtu_test_truncation: float = 0.6
 
     # ---- RUL labels --------------------------------------------------------
     # Piecewise-linear RUL: clip at a constant beyond which degradation is not yet
@@ -205,17 +248,39 @@ class Config:
         """History length (cycles) the TSFM sees. Defaults to the baseline window."""
         return self.tsfm_context_length if self.tsfm_context_length is not None else self.window_size
 
+    def dataset_kind(self) -> str:
+        """'cmapss' or 'xjtu' -- selects the loader in ``data.load_prepared``."""
+        if self.dataset in XJTU_DATASETS:
+            return "xjtu"
+        if self.dataset.startswith("FD"):
+            return "cmapss"
+        raise ValueError(f"unknown dataset {self.dataset!r}; expected FD001-FD004 "
+                         f"or one of {XJTU_DATASETS}")
+
+    def effective_condition_norm(self) -> bool:
+        """Resolved condition-normalization flag: explicit value, else auto by
+        dataset (ON for FD002/FD004 and XJTU-SY, OFF for FD001/FD003)."""
+        if self.condition_norm is not None:
+            return bool(self.condition_norm)
+        return self.dataset in MULTI_CONDITION_DATASETS or self.dataset in XJTU_DATASETS
+
     # ---- cache keys --------------------------------------------------------
     def _window_key_fields(self) -> dict:
         """Fields that determine the RAW cached FIXED windows (model-independent;
         baselines + raw-fusion last-cycle sensors read these)."""
-        return {
+        d = {
             "dataset": self.dataset,
             "window_size": self.window_size,
             "sensor_columns": list(self.sensor_columns),
             "max_rul": self.max_rul,
             "pad_short_test_units": self.pad_short_test_units,
+            # Changes every cached window/embedding when toggled (CHANGES.md §21).
+            "condition_norm": self.effective_condition_norm(),
         }
+        if self.dataset_kind() == "xjtu":  # split protocol changes the data itself
+            d["xjtu_test_bearings"] = sorted(self.xjtu_test_bearings)
+            d["xjtu_test_truncation"] = self.xjtu_test_truncation
+        return d
 
     def _embedding_key_fields(self) -> dict:
         """Fields that determine the cached EMBEDDINGS (Stage A key): the fixed-
