@@ -26,7 +26,112 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from .config import Config, ALL_COLUMNS
+from .config import Config, ALL_COLUMNS, SETTING_COLUMNS, CONDITION_SETTING_DECIMALS
+
+
+# ---------------------------------------------------------------------------
+# Unified entry point (all pipeline stages load through here)
+# ---------------------------------------------------------------------------
+def load_prepared(config: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load ``config.dataset``, attach RUL labels, and apply condition-wise
+    normalization when resolved ON -- the ONE loading path every pipeline stage
+    (Stage A caches, baselines, fairness arms) uses, so no stage can disagree
+    about preprocessing.
+
+    Returns (df_train, df_test), both carrying ``actual_rul``/``clipped_rul`` and
+    the canonical C-MAPSS-shaped columns (unit_number, time_cycles, settings,
+    sensor channels)."""
+    kind = config.dataset_kind()
+    if kind == "cmapss":
+        df_train, df_test, rul_truth = load_cmapss(config)
+    else:  # xjtu -- emitted in the same canonical frame shape (src/xjtu.py)
+        from . import xjtu
+        df_train, df_test, rul_truth = xjtu.load_xjtu(config)
+    df_train = add_train_rul(df_train, config)
+    df_test = add_test_rul(df_test, rul_truth, config)
+    if config.effective_condition_norm():
+        df_train, df_test = condition_normalize(df_train, df_test, config)
+    return df_train, df_test
+
+
+# ---------------------------------------------------------------------------
+# Condition-wise normalization (plan §6; CHANGES.md §21)
+# ---------------------------------------------------------------------------
+def condition_keys(
+    df: pd.DataFrame,
+    setting_columns: list = SETTING_COLUMNS,
+    decimals=CONDITION_SETTING_DECIMALS,
+) -> np.ndarray:
+    """Discrete operating-condition KEY per row: the settings snapped onto their
+    (per-column-rounded) grid, one row per condition combination -- shape
+    ``(n_rows, n_settings)`` float64. Keys are VALUES, not per-frame ranks, so
+    train and test rows at the same operating point always share a key even when
+    the two frames saw different condition sets. No fitting, hence no leakage."""
+    rounded = np.column_stack([
+        np.round(df[c].to_numpy(np.float64), d) for c, d in zip(setting_columns, decimals)
+    ])
+    return rounded + 0.0  # -0.0 -> 0.0 so a rounded zero's sign never splits a condition
+
+
+def identify_conditions(df: pd.DataFrame, **kw) -> np.ndarray:
+    """Per-frame integer condition IDs (rank of the rounded setting tuple within
+    THIS frame) -- for counting/diagnostics only; normalization uses the value
+    keys from ``condition_keys`` so cross-frame alignment never depends on ranks."""
+    _, inverse = np.unique(condition_keys(df, **kw), axis=0, return_inverse=True)
+    return inverse.astype(np.int64)
+
+
+def fit_condition_scaler(
+    df_train: pd.DataFrame, sensor_columns: list, keys: np.ndarray
+) -> dict:
+    """{condition key tuple: (mean, std)} of each sensor channel, fit on TRAIN
+    rows only. Channels flat within a condition get std=1 (they normalize to ~0
+    and carry no signal -- e.g. the 7 conventionally-dropped C-MAPSS sensors).
+    Also stores a ``None``-keyed GLOBAL fallback for operating points never seen
+    in training."""
+    X = df_train[sensor_columns].to_numpy(np.float64)
+    scaler: dict = {}
+    for key in np.unique(keys, axis=0):
+        rows = X[np.all(keys == key, axis=1)]
+        mean, std = rows.mean(axis=0), rows.std(axis=0)
+        std[std < 1e-8] = 1.0
+        scaler[tuple(key)] = (mean, std)
+    g_mean, g_std = X.mean(axis=0), X.std(axis=0)
+    g_std[g_std < 1e-8] = 1.0
+    scaler[None] = (g_mean, g_std)
+    return scaler
+
+
+def apply_condition_scaler(
+    df: pd.DataFrame, sensor_columns: list, keys: np.ndarray, scaler: dict
+) -> pd.DataFrame:
+    """Z-normalize each row's sensor channels with its condition's train-fit
+    statistics (global fallback for conditions unseen in training). Returns a
+    copy."""
+    out = df.copy()
+    # copy=True: pandas copy-on-write may hand back a read-only view otherwise
+    X = out[sensor_columns].to_numpy(np.float64, copy=True)
+    for key in np.unique(keys, axis=0):
+        mean, std = scaler.get(tuple(key), scaler[None])
+        m = np.all(keys == key, axis=1)
+        X[m] = (X[m] - mean) / std
+    out[sensor_columns] = X
+    return out
+
+
+def condition_normalize(
+    df_train: pd.DataFrame, df_test: pd.DataFrame, config: Config
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Condition-wise z-normalization of both frames, statistics fit on the FULL
+    train frame once (never on test). Fitting once over all train units -- rather
+    than per data fraction -- is a deliberate, documented deviation (CHANGES.md
+    §21): it keeps the single-pass embedding cache, and condition statistics are
+    properties of the operating points, insensitive to which units are sampled."""
+    cols = config.sensor_columns
+    k_tr, k_te = condition_keys(df_train), condition_keys(df_test)
+    scaler = fit_condition_scaler(df_train, cols, k_tr)
+    return (apply_condition_scaler(df_train, cols, k_tr, scaler),
+            apply_condition_scaler(df_test, cols, k_te, scaler))
 
 
 # ---------------------------------------------------------------------------

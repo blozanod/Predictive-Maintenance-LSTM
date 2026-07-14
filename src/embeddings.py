@@ -268,9 +268,9 @@ def build_embedding_cache(
     if cache_path.exists() and not overwrite:
         return cache_path
 
-    df_train, df_test, rul_truth = data_mod.load_cmapss(config)
-    df_train = data_mod.add_train_rul(df_train, config)
-    df_test = data_mod.add_test_rul(df_test, rul_truth, config)
+    # ONE loading path for every stage: labels + (resolved) condition-wise
+    # normalization applied identically everywhere (CHANGES.md §21).
+    df_train, df_test = data_mod.load_prepared(config)
 
     ws, tsfm_ctx = config.window_size, config.effective_tsfm_context()
     cols = config.sensor_columns
