@@ -39,6 +39,32 @@ from .models import EMBEDDERS
 
 CAMPAIGN_STAGES = ("cache", "sweep", "fairness", "horizon", "figures")
 
+# Per-dataset protocol defaults recorded ONCE here (CHANGES.md §30) instead of every
+# notebook re-deciding them. A user-supplied ``dataset_overrides`` is merged OVER these
+# per dataset, per key (the user always wins). Pass ``dataset_overrides={}`` to opt out.
+DEFAULT_DATASET_OVERRIDES = {
+    # XJTU-SY "cycles" are MINUTES (CHANGES.md §22). DECISION (uncited): max_rul=125 min
+    # keeps the piecewise-target convention uniform with C-MAPSS (the unit differs;
+    # bearings degrade over ~42 min-42 h); window_size=30 minutes; tsfm_context_length=
+    # 256 mirrors the recorded §12 winner shape.
+    "XJTU-SY": {"max_rul": 125, "window_size": 30, "tsfm_context_length": 256},
+    # DSALL: pin the member list so its cache key is deterministic once every file is
+    # downloaded (§28). Absent members raise, so this is safe to leave set -- a partial
+    # download surfaces loudly rather than silently unioning a different fleet.
+    "DSALL": {"dsall_datasets": ["DS01", "DS02", "DS03", "DS04", "DS05", "DS06",
+                                 "DS07", "DS08a", "DS08c", "DS08d"]},
+}
+
+
+def merge_dataset_overrides(user: Optional[dict]) -> dict:
+    """DEFAULT_DATASET_OVERRIDES with ``user`` merged over it, per dataset per key
+    (user wins). ``user=None`` -> the defaults; ``user={}`` -> also the defaults (there
+    is nothing to override); a dataset present only in ``user`` is kept verbatim."""
+    merged = {ds: dict(over) for ds, over in DEFAULT_DATASET_OVERRIDES.items()}
+    for ds, over in (user or {}).items():
+        merged[ds] = {**merged.get(ds, {}), **over}
+    return merged
+
 
 def campaign_experiment_name(base: Config, dataset: str, model_name: str) -> str:
     """``[<base.experiment_name>_]<dataset>_<model-tag>`` -- the per-combo
@@ -103,10 +129,18 @@ def run_campaign(
 ) -> list[dict]:
     """The run-all entry point (see module docstring). ``embedder_factory`` is
     the CPU-test injection hook, exactly as in ``run_transfer_eval``;
-    ``baseline_names`` passes through to ``run_sweep`` (None => its default set)."""
+    ``baseline_names`` passes through to ``run_sweep`` (None => its default set).
+
+    ``dataset_overrides`` semantics (CHANGES.md §30): ``None`` (default) uses
+    ``DEFAULT_DATASET_OVERRIDES``; a non-empty dict is merged OVER those defaults
+    (user wins per dataset per key); an explicit ``{}`` opts out of all overrides."""
     datasets = datasets if datasets is not None else datasets_mod.all_dataset_names()
     models = models if models is not None else sorted(EMBEDDERS)
-    dataset_overrides = dataset_overrides or {}
+    if dataset_overrides is None:
+        dataset_overrides = merge_dataset_overrides(None)       # the recorded defaults
+    elif dataset_overrides:                                     # non-empty -> merge
+        dataset_overrides = merge_dataset_overrides(dataset_overrides)
+    # else: explicit {} -> no overrides at all (opt-out)
 
     summary: list[dict] = []
     for ds in datasets:
@@ -121,8 +155,10 @@ def run_campaign(
             continue
         for model_name in models:
             cfg = _combo_config(base_config, ds, model_name, dataset_overrides)
+            over = dataset_overrides.get(ds, {})
             print(f"[campaign] {ds} x {model_name} -> experiment "
-                  f"'{cfg.experiment_name}' (stages: {', '.join(stages)})")
+                  f"'{cfg.experiment_name}' (stages: {', '.join(stages)}"
+                  f"{'; overrides: ' + str(over) if over else ''})")
             try:
                 artifacts = _run_stages(cfg, stages, device, embedder_factory,
                                         baseline_names)

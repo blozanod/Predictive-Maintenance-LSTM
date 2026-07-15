@@ -566,6 +566,24 @@ Tests: `resolve_unit_counts` unit cases + a 5-train-unit sweep that yields exact
 {2,5} from `data_unit_counts=[2,50]`. Two pre-existing 8-unit smoke/fairness tests were
 updated (they now legitimately gain the 8-unit full-fleet cell).
 
+## 30. Campaign default overrides + notebook data-layout instructions
+- **`campaign.DEFAULT_DATASET_OVERRIDES`** records per-dataset protocol choices ONCE
+  instead of every notebook re-deciding them: XJTU-SY (`max_rul=125` min, `window_size=30`,
+  `tsfm_context_length=256` — cycles are minutes, §22) and DSALL (`dsall_datasets` pinned
+  to all 10 members for a deterministic cache key, §28). `run_campaign`'s
+  `dataset_overrides` now means: `None` (default) → the recorded defaults; a non-empty
+  dict → merged OVER them per dataset per key (user wins); explicit `{}` → opt out of all
+  overrides. `merge_dataset_overrides` deep-copies so the module constant is never
+  mutated. The per-combo log line prints the resolved override for provenance.
+- **Notebook** (`colab_main.ipynb`): the Config markdown documents the one-`data_root`
+  layout (`Data/CMAPSSData`, `Data/XJTU-SY`, `Data/N-CMAPSS` flat `.h5`), the accepted
+  XJTU folder-name/nesting variants (§26), and the first-run N-CMAPSS aggregate-cache
+  parse (§27). The campaign markdown lists the full dataset set (FD001–FD004 + XJTU-SY +
+  DS01…DS08d + DSALL) and explains the override semantics; the campaign cell now calls
+  `run_campaign(config, device=…)` with the recorded defaults (the old hand-written XJTU
+  override that conflicted with the pinned protocol is removed). Only cells 2–3 changed;
+  the deep-dive sections are untouched.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,
