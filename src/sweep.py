@@ -39,6 +39,18 @@ CELL_KEYS = ["model", "dataset", "n_units", "seed", "loss"]  # dataset: multi-da
 ABLATION_KEYS = ["model", "dataset", "tsfm_context_length", "head_features", "pooling", "seed", "loss"]
 
 
+def resolve_unit_counts(counts, available: int) -> list[int]:
+    """The data-scaling grid for a dataset with ``available`` train units: every
+    requested count strictly below ``available``, PLUS the full-fleet cell (§29).
+
+    The default grid ``[2,5,10,25,50,100]`` skips counts above the fleet size, so small
+    datasets (XJTU-SY: 9 bearings; N-CMAPSS DS02: 6 dev units) would never get a full-
+    data cell. Appending ``available`` guarantees one. For datasets with >= max(counts)
+    units (FD001-FD004: 100) the result is exactly ``counts``, so every existing restart
+    key and recorded result stays valid."""
+    return sorted({n for n in counts if n < available} | {available})
+
+
 # ---------------------------------------------------------------------------
 # Shared TSFM-head machinery (cache on device once; per-cell feature assembly)
 # ---------------------------------------------------------------------------
@@ -182,9 +194,7 @@ def run_sweep(
     all_units = np.unique(tr_u)
     done = completed_cells(results_csv, CELL_KEYS)
 
-    for n_units in config.data_unit_counts:
-        if n_units > len(all_units):
-            continue
+    for n_units in resolve_unit_counts(config.data_unit_counts, len(all_units)):
         for seed in config.sweep_seeds:
             sampled = data_mod.subsample_units(all_units, n_units, seed)
             train_u, val_u = data_mod.unit_train_val_split(sampled, config.val_fraction, seed)
@@ -417,7 +427,8 @@ def run_fairness_baselines(
     tr_age, te_age = tr_w[:, -1, 0], te_w[:, -1, 0]   # elapsed cycles at prediction time
 
     all_units = np.unique(tr_u)
-    n_units_list = n_units_list if n_units_list is not None else list(config.data_unit_counts)
+    n_units_list = (n_units_list if n_units_list is not None
+                    else resolve_unit_counts(config.data_unit_counts, len(all_units)))
     done = completed_cells(results_csv, CELL_KEYS)
 
     for n_units in n_units_list:

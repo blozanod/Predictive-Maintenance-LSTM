@@ -548,6 +548,24 @@ modes and flight classes, a realistic mixed fleet. `dataset="DSALL"`:
   that file). DSALL rows are keyed `dataset="DSALL"` — no schema change (the `dataset`
   column has been a restart key since §21).
 
+## 29. Unit-count grid auto-appends the full fleet
+`run_sweep` and `run_fairness_baselines` previously **skipped** any
+`n_units > available` (`if n_units > len(all_units): continue`), so a dataset smaller
+than `max(data_unit_counts)` never got a full-data cell — XJTU-SY (9 train bearings)
+ran only {2,5}; N-CMAPSS DS02 (6 dev units) only {2,5}; neither ever reached its own
+full fleet. New `sweep.resolve_unit_counts(counts, available)` returns
+`sorted({n for n in counts if n < available} | {available})` — every requested count
+below the fleet size **plus the full-fleet cell**. Wired into both functions' default
+grid.
+- FD001–FD004 (100 train units, grid max 100): result is exactly the requested grid, so
+  **every existing restart key and recorded result stays valid** (asserted in tests).
+- XJTU-SY → {2,5,9}; DS02 → {2,5,6}; DSALL → {2,5,10,25,50,…,N}.
+- `run_horizon_eval` already defaults `n_units_list` to `[len(all_units)]` (the full
+  fleet) and the campaign passes it all-units, so horizon needed no change.
+Tests: `resolve_unit_counts` unit cases + a 5-train-unit sweep that yields exactly
+{2,5} from `data_unit_counts=[2,50]`. Two pre-existing 8-unit smoke/fairness tests were
+updated (they now legitimately gain the 8-unit full-fleet cell).
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,
