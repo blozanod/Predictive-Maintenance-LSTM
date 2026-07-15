@@ -235,6 +235,42 @@ def test_xjtu_unmatched_condition_folder_raises(xjtu_root, tmp_path):
         shutil.rmtree(xjtu_root / "45Hz9kN")
 
 
+# --- §26: tolerant data-dir resolution (alternate subdir name + depth-1 nesting) ---
+def _xjtu_cfg_rooted(data_root: Path, tmp_path: Path) -> Config:
+    """XJTU config that resolves via data_root/subdir candidates (data_dir=None)."""
+    return Config(
+        dataset="XJTU-SY", data_root=str(data_root), data_dir=None,
+        cache_dir=str(tmp_path / "cache"), results_dir=str(tmp_path / "results"),
+        window_size=6, sensor_columns=list(XJTU_FEATURE_COLUMNS), max_rul=15,
+        xjtu_test_bearings=["Bearing1_3", "Bearing2_3", "Bearing3_3"],
+        xjtu_test_truncation=0.6,
+    )
+
+
+def test_xjtu_resolves_alternate_subdir_name(tmp_path):
+    """The zip's own folder name ``XJTU-SY_Bearing_Datasets`` loads without renaming."""
+    data_root = tmp_path / "Data"
+    write_synthetic_xjtu(data_root / "XJTU-SY_Bearing_Datasets",
+                         bearings_per_condition=3, min_snapshots=18, max_snapshots=30,
+                         samples_per_snapshot=128)
+    cfg = _xjtu_cfg_rooted(data_root, tmp_path)
+    df_train, df_test, rul = load_xjtu(cfg)
+    assert df_train["unit_number"].nunique() == 6 and df_test["unit_number"].nunique() == 3
+
+
+def test_xjtu_resolves_one_level_nesting(tmp_path):
+    """Zip-in-a-folder (condition dirs one level below the resolved root) loads."""
+    data_root = tmp_path / "Data"
+    write_synthetic_xjtu(data_root / "XJTU-SY" / "XJTU-SY_Bearing_Datasets",
+                         bearings_per_condition=3, min_snapshots=18, max_snapshots=30,
+                         samples_per_snapshot=128)
+    cfg = _xjtu_cfg_rooted(data_root, tmp_path)
+    from src import datasets as DS
+    assert DS.is_available(cfg)
+    df_train, _, _ = load_xjtu(cfg)
+    assert df_train["unit_number"].nunique() == 6
+
+
 # ---------------------------------------------------------------------------
 # §24 fixes: registry consistency, sensor-column defaults, experiment_name guard
 # ---------------------------------------------------------------------------

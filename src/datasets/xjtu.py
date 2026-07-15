@@ -46,8 +46,11 @@ import pandas as pd
 from ..config import Config, XJTU_BASE_FEATURES, XJTU_FEATURE_COLUMNS
 from .base import resolve_data_dir
 
-# Subdirectory of ``config.data_root`` holding the 3 XJTU-SY condition folders.
-XJTU_SUBDIR = "XJTU-SY"
+# Accepted subdirectory names of ``config.data_root`` holding the 3 XJTU-SY
+# condition folders. The documented layout is ``XJTU-SY``; the zip ships as
+# ``XJTU-SY_Bearing_Datasets`` and users often drop it verbatim -- accept both
+# (resolve_data_dir picks the first that exists; CHANGES.md §26).
+XJTU_SUBDIR = ("XJTU-SY", "XJTU-SY_Bearing_Datasets")
 
 # Dataset names this family serves (the campaign sweeps these, CHANGES.md §24).
 DATASETS = ("XJTU-SY",)
@@ -109,6 +112,31 @@ def _bearing_frame(bearing_dir: Path, unit_id: int, cond: tuple) -> pd.DataFrame
     return pd.DataFrame(rows, columns=cols)
 
 
+def _has_condition_dir(root: Path) -> bool:
+    """True if ``root`` directly contains a known condition folder."""
+    return root.is_dir() and any((root / name).is_dir() for name in XJTU_CONDITIONS)
+
+
+def _descend_to_conditions(root: Path, verbose: bool = True) -> Path:
+    """Return the directory that directly holds the condition folders.
+
+    If ``root`` already holds them, return it. Otherwise scan ``root``'s IMMEDIATE
+    subdirectories (depth-1 only, no recursive walk) for one that does -- this
+    absorbs the common zip-in-a-folder nesting
+    (``XJTU-SY/XJTU-SY_Bearing_Datasets/35Hz12kN/...``). If none qualifies, return
+    ``root`` unchanged so the caller's "not found" error names the documented path.
+    """
+    if _has_condition_dir(root) or not root.is_dir():
+        return root
+    for child in sorted(p for p in root.iterdir() if p.is_dir()):
+        if _has_condition_dir(child):
+            if verbose:
+                print(f"[xjtu] descending into nested folder {child.name!r} "
+                      f"(condition folders found one level down)")
+            return child
+    return root
+
+
 def _check_unmatched_conditions(root: Path) -> None:
     """Raise if ``root`` holds a condition-LOOKING folder we don't recognize.
 
@@ -132,7 +160,7 @@ def _check_unmatched_conditions(root: Path) -> None:
 def is_available(config: Config) -> bool:
     """Cheap on-disk check: does at least one XJTU-SY condition folder exist?
     (The campaign skips unavailable datasets with a notice, CHANGES.md §24.)"""
-    root = resolve_data_dir(config, XJTU_SUBDIR)
+    root = _descend_to_conditions(resolve_data_dir(config, XJTU_SUBDIR), verbose=False)
     return any((root / name).is_dir() for name in XJTU_CONDITIONS)
 
 
@@ -141,7 +169,7 @@ def load_xjtu(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     split + test-truncation protocol. Mirrors ``data.load_cmapss``'s return
     contract: (df_train, df_test, rul_truth), rul_truth indexed by unit_number =
     remaining cycles (minutes) at each TEST unit's last kept snapshot."""
-    root = resolve_data_dir(config, XJTU_SUBDIR)
+    root = _descend_to_conditions(resolve_data_dir(config, XJTU_SUBDIR))
     _check_unmatched_conditions(root)
     found = {}
     for cond_name, cond in XJTU_CONDITIONS.items():

@@ -466,6 +466,21 @@ could exist** (the old loader raised on the default split); if you built a cache
 hand-hacked config, delete `cache/emb_XJTU-SY_*.npz` and `cache/windows_XJTU-SY_*` before
 rerunning.
 
+## 26. Tolerant data-dir resolution: subdir candidates + depth-1 nesting
+Two real-world layout frictions, absorbed so the user never renames or reshuffles a
+downloaded dataset:
+- **Alternate subdir names.** `resolve_data_dir(config, subdir)` now accepts a tuple
+  of candidate names and returns the first that exists under `config.data_root` (else
+  the first candidate, so "not found" errors name the documented path). XJTU declares
+  `("XJTU-SY", "XJTU-SY_Bearing_Datasets")` — the zip's own name loads as-is.
+- **Zip-in-a-folder nesting.** `xjtu._descend_to_conditions` checks the resolved root
+  for the condition folders and, if absent, scans its IMMEDIATE subdirectories
+  (depth-1 only, no recursive walk) for one that holds them, descending with a printed
+  notice. Absorbs `XJTU-SY/XJTU-SY_Bearing_Datasets/35Hz12kN/...`.
+An explicit `config.data_dir` still wins verbatim (tests point it straight at a folder).
+Paths are **not** part of any cache key (§23), so this changes no embeddings/results.
+The same tuple mechanism is reused by the N-CMAPSS loader (§27).
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,
