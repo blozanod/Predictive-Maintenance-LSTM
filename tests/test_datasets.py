@@ -388,8 +388,54 @@ def test_ncmapss_registry_and_defaults():
     from src import datasets as DS
     assert Config(dataset="DS03").dataset_kind() == "ncmapss"
     assert Config(dataset="DS08d").dataset_kind() == "ncmapss"
+    assert Config(dataset="DSALL").dataset_kind() == "ncmapss"
     assert Config(dataset="DS02").sensor_columns == list(NCMAPSS_FEATURE_COLUMNS)
     assert "ncmapss" in DS.DATASET_LOADERS and "ncmapss" in DS.DATASET_FAMILIES
+
+
+# ---------------------------------------------------------------------------
+# §28: DSALL combined N-CMAPSS fleet (RQ1 high-data arm)
+# ---------------------------------------------------------------------------
+def _write_two_ds(root: Path):
+    write_synthetic_ncmapss(root, dataset="DS02", n_dev_units=3, n_test_units=2, seed=1)
+    write_synthetic_ncmapss(root, dataset="DS03", n_dev_units=2, n_test_units=2, seed=2)
+
+
+def test_dsall_unions_files_without_id_collision(tmp_path):
+    _write_two_ds(tmp_path / "Data" / "N-CMAPSS")
+    cfg = _ncmapss_cfg(tmp_path / "Data", tmp_path, dataset="DSALL")
+    df_train, df_test, rul = load_ncmapss(cfg)
+    # 3 (DS02) + 2 (DS03) dev units, renumbered file_index*1000+unit -> no collision
+    assert df_train["unit_number"].nunique() == 5
+    assert set(df_train.unit_number) == {1, 2, 3, 1001, 1002}
+    assert set(df_test.unit_number) == {100, 101, 1100, 1101}
+    assert set(rul.index) == set(df_test.unit_number)
+    assert (rul > 0).all()
+
+
+def test_dsall_availability_needs_two_files(tmp_path):
+    from src import datasets as DS
+    ncdir = tmp_path / "Data" / "N-CMAPSS"
+    write_synthetic_ncmapss(ncdir, dataset="DS02", seed=1)
+    one = _ncmapss_cfg(tmp_path / "Data", tmp_path, dataset="DSALL")
+    assert not DS.is_available(one)                 # 1 file -> not a union
+    write_synthetic_ncmapss(ncdir, dataset="DS03", seed=2)
+    assert DS.is_available(one)                     # 2 files -> available
+
+
+def test_dsall_explicit_members_are_deterministic_and_checked(tmp_path):
+    _write_two_ds(tmp_path / "Data" / "N-CMAPSS")
+    auto = _ncmapss_cfg(tmp_path / "Data", tmp_path, dataset="DSALL")
+    explicit = auto.replace(dsall_datasets=["DS02", "DS03"])
+    # explicit member list changes the cache key (keyed by members, not "auto")
+    assert auto.window_cache_key() != explicit.window_cache_key()
+    load_ncmapss(explicit)   # both present -> loads
+    # a named-but-absent member raises (DS04 is a valid name, not on disk)
+    with pytest.raises(FileNotFoundError, match="DS04"):
+        load_ncmapss(auto.replace(dsall_datasets=["DS02", "DS04"]))
+    # a single-member "union" is degenerate -> raises
+    with pytest.raises(ValueError, match=">= 2"):
+        load_ncmapss(auto.replace(dsall_datasets=["DS02"]))
 
 
 # ---------------------------------------------------------------------------

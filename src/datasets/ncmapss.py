@@ -260,6 +260,83 @@ def load_ncmapss(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]
     return df_train, df_test, rul_truth
 
 
-def _load_dsall(config: Config):
-    raise NotImplementedError(
-        "DSALL is implemented in CHANGES.md §28 (Task 4 of DATASET_EXPANSION_PLAN.md).")
+# ---------------------------------------------------------------------------
+# DSALL: the combined all-files fleet (the RQ1 high-data arm; CHANGES.md §28)
+# ---------------------------------------------------------------------------
+# Per-file N-CMAPSS is a LOW-unit dataset (6-9 dev units) -- by-unit it sits at the
+# LOW end of the data-efficiency sweep, not the high end RESEARCH_PLAN §3 wanted. The
+# high-data arm is the UNION of every file: ~100+ units with heterogeneous failure
+# modes and flight classes, a realistic mixed fleet. Units are renumbered
+# ``file_index * 1000 + unit`` (collision-proof, reversible: file_index = uid // 1000,
+# original unit = uid % 1000); each file keeps its dev/test roles.
+_DSALL_UNIT_STRIDE = 1000
+
+# The per-file DS names DSALL may union (everything except DSALL itself).
+_DSALL_MEMBER_NAMES = tuple(n for n in NCMAPSS_DATASETS if n != "DSALL")
+
+
+def dsall_members_on_disk(config: Config) -> list[str]:
+    """Per-file DS names whose .h5 is present under the N-CMAPSS root (sorted)."""
+    root = _resolve_dir(config)
+    if not root.is_dir():
+        return []
+    return [ds for ds in _DSALL_MEMBER_NAMES if sorted(root.glob(_glob_for(ds)))]
+
+
+def _resolve_dsall_members(config: Config) -> list[str]:
+    """Which member files DSALL unions this run.
+
+    * ``config.dsall_datasets`` set -> EXACTLY those (reproducible); raise if any is
+      missing on disk or is not a valid per-file DS name.
+    * None -> whatever is on disk (convenience for exploration; keyed "auto" so it
+      never masquerades as a fixed dataset). Require >= 2 (a 1-file union is that file).
+    """
+    if config.dsall_datasets is not None:
+        members = list(config.dsall_datasets)
+        bad = [m for m in members if m not in _DSALL_MEMBER_NAMES]
+        if bad:
+            raise ValueError(
+                f"dsall_datasets contains non-member name(s) {bad}; valid members are "
+                f"{list(_DSALL_MEMBER_NAMES)}.")
+        present = set(dsall_members_on_disk(config))
+        missing = [m for m in members if m not in present]
+        if missing:
+            raise FileNotFoundError(
+                f"DSALL requires member file(s) {missing} but they are not on disk "
+                f"under {_resolve_dir(config)}; download them or drop them from "
+                f"config.dsall_datasets.")
+        if len(set(members)) < 2:
+            raise ValueError(
+                f"DSALL is a UNION and needs >= 2 members; got {members}. Use the "
+                f"single per-file dataset directly instead.")
+        return sorted(set(members))
+    members = dsall_members_on_disk(config)
+    if len(members) < 2:
+        raise FileNotFoundError(
+            f"DSALL needs >= 2 N-CMAPSS_DS*.h5 files under {_resolve_dir(config)}; "
+            f"found {members}. Download more, or use a single per-file dataset.")
+    return sorted(members)
+
+
+def _load_dsall(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Union every resolved member file into one fleet, renumbering units so ids never
+    collide across files. Each file is loaded through its own per-file aggregate cache
+    (§27), so DSALL costs nothing beyond the per-file parses."""
+    members = _resolve_dsall_members(config)
+    print(f"[ncmapss] DSALL unions {len(members)} files: {members}")
+    train_frames, test_frames, rul = [], [], {}
+    for file_index, ds in enumerate(members):
+        df_train_full, df_test_full = _load_or_build_aggregate(config, ds)
+        df_test, ds_rul = _truncate_test(df_test_full, config)
+        offset = file_index * _DSALL_UNIT_STRIDE
+        for df in (df_train_full, df_test):
+            df["unit_number"] = df["unit_number"] + offset
+        train_frames.append(df_train_full)
+        test_frames.append(df_test)
+        for unit_id, r in ds_rul.items():
+            rul[unit_id + offset] = r
+    df_train = pd.concat(train_frames, ignore_index=True)
+    df_test = pd.concat(test_frames, ignore_index=True)
+    rul_truth = pd.Series(rul, name="rul_truth").sort_index()
+    rul_truth.index.name = "unit_number"
+    return df_train, df_test, rul_truth

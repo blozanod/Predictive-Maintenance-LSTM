@@ -528,6 +528,26 @@ stage runs unchanged. All choices are `DECISION (uncited)` — there is no commu
   to requirements (core: tests write synthetic h5). The registry-drift test covers the
   new family automatically.
 
+## 28. DSALL — the combined N-CMAPSS fleet (RQ1 high-data arm)
+**Per-file N-CMAPSS is a LOW-unit dataset** (6–9 dev units): by-unit it sits at the
+*low* end of the data-efficiency sweep, not the high end RESEARCH_PLAN §3 wanted. The
+high-data arm is the **union of every file** — ~100+ units with heterogeneous failure
+modes and flight classes, a realistic mixed fleet. `dataset="DSALL"`:
+- Iterates every resolved member file, each loaded through its own per-file aggregate
+  cache (§27) — so DSALL costs nothing beyond the per-file parses.
+- **Unit renumbering** `file_index*1000 + unit` (collision-proof, reversible:
+  `file_index = uid // 1000`, `unit = uid % 1000`). Each file keeps its dev/test roles
+  and per-unit truncation.
+- **Member determinism.** `config.dsall_datasets` set → EXACTLY those members
+  (reproducible), raising on any non-member name, any named-but-absent file, or fewer
+  than 2 members; the sorted member list joins the window cache key. None → whatever is
+  on disk (≥2 required), keyed literally `"auto"` so an exploration union never
+  masquerades as a fixed dataset. The campaign pins the full list (§30). The resolved
+  members are printed at load and captured in run-metadata via the resolved config.
+- `is_available("DSALL")` requires ≥2 `N-CMAPSS_DS*.h5` present (a 1-file union is just
+  that file). DSALL rows are keyed `dataset="DSALL"` — no schema change (the `dataset`
+  column has been a restart key since §21).
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,
