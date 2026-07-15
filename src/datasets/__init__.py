@@ -11,16 +11,17 @@ from __future__ import annotations
 
 from ..config import Config
 from .base import resolve_data_dir
-from . import cmapss, xjtu
+from . import cmapss, xjtu, ncmapss
 
 # dataset kind (config.dataset_kind()) -> (loader, subdir under config.data_root).
 DATASET_LOADERS = {
     "cmapss": (cmapss.load_cmapss, cmapss.CMAPSS_SUBDIR),
     "xjtu": (xjtu.load_xjtu, xjtu.XJTU_SUBDIR),
+    "ncmapss": (ncmapss.load_ncmapss, ncmapss.NCMAPSS_SUBDIR),
 }
 
 # dataset kind -> family module (DATASETS names + is_available live there).
-DATASET_FAMILIES = {"cmapss": cmapss, "xjtu": xjtu}
+DATASET_FAMILIES = {"cmapss": cmapss, "xjtu": xjtu, "ncmapss": ncmapss}
 
 
 def load_raw(config: Config):
@@ -43,4 +44,4 @@ def is_available(config: Config) -> bool:
 
 
 __all__ = ["DATASET_LOADERS", "DATASET_FAMILIES", "load_raw", "resolve_data_dir",
-           "all_dataset_names", "is_available", "cmapss", "xjtu"]
+           "all_dataset_names", "is_available", "cmapss", "xjtu", "ncmapss"]

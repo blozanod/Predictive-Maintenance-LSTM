@@ -481,6 +481,53 @@ An explicit `config.data_dir` still wins verbatim (tests point it straight at a 
 Paths are **not** part of any cache key (§23), so this changes no embeddings/results.
 The same tuple mechanism is reused by the N-CMAPSS loader (§27).
 
+## 27. N-CMAPSS loader (src/datasets/ncmapss.py) — cycle-aggregated frames
+Adds the NASA N-CMAPSS run-to-failure dataset (Arias Chao et al. 2021; one `.h5` per
+sub-dataset DS01–DS08d) into the canonical C-MAPSS-shaped frame, so every downstream
+stage runs unchanged. All choices are `DECISION (uncited)` — there is no community
+*cycle-level* N-CMAPSS protocol.
+- **Cycle aggregation.** The raw data is 1 Hz WITHIN each flight; one flight = one
+  cycle. Each `(unit, cycle)` group is reduced to per-cycle summary statistics:
+  `mean` + `std` of each of the 18 raw channels (4 flight-condition `W` + 14 measured
+  `X_s`), plus `cycle_len_s` = the number of 1 Hz rows in the flight (observable flight
+  duration). **37 channels** = `NCMAPSS_FEATURE_COLUMNS` (config). `std` is pandas'
+  sample std (ddof=1); one-row cycles → NaN → 0.
+- **Oracles excluded.** Virtual sensors `X_v`, health-parameter ground truth `T`, and
+  the per-row RUL `Y` are simulation oracles and are **never read**. RUL is re-derived
+  from cycle counts by `data.add_train_rul`, exactly as for C-MAPSS. The synthetic test
+  fixture writes those keys full-length to prove the loader ignores them.
+- **Channel-name fail-loud.** The decoded `W_var`/`X_s_var` from the file must equal
+  `NCMAPSS_W_VARS`/`NCMAPSS_XS_VARS` *as sets* (the file's order is used for reading);
+  a mismatch raises listing both sets rather than silently reordering.
+- **`setting_1 = Fc`** (flight class 1/2/3, constant per unit); `setting_2/3 = 0`.
+  `condition_norm` resolves **auto-OFF** (flight conditions are continuous, already
+  carried as channels); force `condition_norm=True` for per-flight-class normalization.
+- **Split & truncation.** Train = the file's `*_dev` units (full run-to-failure); test =
+  the file's `*_test` units (preserving the dataset's deliberate distribution shift),
+  truncated at `config.ncmapss_test_truncation` (default 0.6) of life so the predict-at-
+  last-observed-cycle protocol applies — same device as XJTU (§22). `rul_truth` =
+  remaining cycles. New `ncmapss_test_truncation` config field is in the window cache key
+  **only** when `dataset_kind()=="ncmapss"` (FD001/XJTU keys byte-identical to before —
+  verified: `windows_FD001_1da313c871251cec`).
+- **`max_rul` inactive.** N-CMAPSS end-of-life is ~60–100 cycles, so the default cap 125
+  never binds → the target is plain linear RUL (matches N-CMAPSS community practice). Do
+  not "fix" this.
+- **Parsed-frame cache.** Parsing 1–3 GB of h5 is minutes; the aggregate is ~10²–10³
+  rows. Cached to `cache/ncmapss_agg_<ds>_v<NCMAPSS_AGG_VERSION>.npz` (untruncated, so
+  truncation re-applies from config without re-parsing). `NCMAPSS_AGG_VERSION=1` plays
+  the cache-schema role for aggregation logic; the aggregate is otherwise
+  config-independent. The cache is keyed by `ds`+version only (location-independent,
+  like embeddings, §23) — pointing at a different N-CMAPSS directory with the same DS
+  name reuses the cache; delete it to force a re-parse.
+- **Non-comparability warning.** Published N-CMAPSS RMSEs use 1 Hz sub-cycle windows over
+  full test trajectories. These cycle-aggregated, truncation-protocol numbers are **not
+  comparable** to them and must never share a table (role: same-protocol cross-model
+  comparison for RQ1/RQ4, like XJTU-SY).
+- **Registry.** `dataset_kind()` maps `DS*` → `ncmapss`; `datasets/__init__` registers
+  the family; `DEFAULT_SENSOR_COLUMNS["ncmapss"]` = the 37 channels. `h5py>=3.10` added
+  to requirements (core: tests write synthetic h5). The registry-drift test covers the
+  new family automatically.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,

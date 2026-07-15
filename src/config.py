@@ -79,6 +79,27 @@ MULTI_CONDITION_DATASETS = ("FD002", "FD004")
 # low-data domain (plan §3). "Cycles" are 1-minute snapshots.
 XJTU_DATASETS = ("XJTU-SY",)
 
+# N-CMAPSS (NASA "Turbofan Engine Degradation Simulation Data Set 2"; Arias Chao et
+# al. 2021). One .h5 per sub-dataset, 1 Hz WITHIN flights; the loader aggregates each
+# flight cycle to per-cycle summary statistics so the canonical frame stays cycle-
+# level like C-MAPSS (CHANGES.md §27). DSALL is the combined all-files fleet -- the
+# RQ1 high-data arm (§28). Per-file names carry the DS0x id; "DS08a/c/d" are separate.
+NCMAPSS_DATASETS = ("DS01", "DS02", "DS03", "DS04", "DS05", "DS06", "DS07",
+                    "DS08a", "DS08c", "DS08d", "DSALL")
+
+# N-CMAPSS channel schema. W = flight-condition scenario descriptors (4), X_s =
+# measured sensors (14); virtual sensors X_v, health params T, and per-row RUL Y are
+# simulation ORACLES and are never read (CHANGES.md §27). Names/order are asserted
+# against the file's decoded *_var arrays at load time (fail loud on drift). Per-cycle
+# features = mean+std of each of the 18 raw channels, plus cycle length in seconds.
+NCMAPSS_W_VARS = ("alt", "Mach", "TRA", "T2")
+NCMAPSS_XS_VARS = ("T24", "T30", "T48", "T50", "P15", "P2", "P21", "P24",
+                   "Ps30", "P40", "P50", "Nf", "Nc", "Wf")
+NCMAPSS_FEATURE_COLUMNS = (
+    [f"{v}_{s}" for v in NCMAPSS_W_VARS + NCMAPSS_XS_VARS for s in ("mean", "std")]
+    + ["cycle_len_s"]
+)
+
 # Rounding (decimals per setting column) used to snap the 3 operational settings
 # onto their discrete condition grid before grouping: altitude wobbles ~0.008
 # around {0,10,20,25,35,42}K ft, Mach ~0.001 around {0..0.84}, TRA is {20..100}.
@@ -100,6 +121,7 @@ XJTU_FEATURE_COLUMNS = [f"{ax}_{f}" for ax in ("h", "v") for f in XJTU_BASE_FEAT
 DEFAULT_SENSOR_COLUMNS = {
     "cmapss": list(FD001_NONCONSTANT_SENSORS),
     "xjtu": list(XJTU_FEATURE_COLUMNS),
+    "ncmapss": list(NCMAPSS_FEATURE_COLUMNS),
 }
 
 
@@ -141,6 +163,18 @@ class Config:
         "Bearing1_4", "Bearing1_5", "Bearing2_4", "Bearing2_5",
         "Bearing3_4", "Bearing3_5"])
     xjtu_test_truncation: float = 0.6
+
+    # ---- N-CMAPSS split protocol (ignored for C-MAPSS/XJTU; CHANGES.md §27-28) --
+    # The file's own *_test units are run-to-failure (RUL hits 0 at the last row); to
+    # match the pipeline's predict-at-last-observed-cycle protocol each test unit is
+    # truncated at this life fraction (same device as XJTU, §22). ncmapss-only cache-
+    # key field.
+    ncmapss_test_truncation: float = 0.6
+    # DSALL member list (§28): which per-file DS0x datasets the combined fleet unions.
+    # None => whatever N-CMAPSS_DS*.h5 is on disk at load time (keyed "auto" -- for
+    # exploration only). Set an explicit list for reproducible runs (the campaign does,
+    # §30); the loader then REQUIRES every named member and raises if one is missing.
+    dsall_datasets: Optional[list] = None
 
     # ---- RUL labels --------------------------------------------------------
     # Piecewise-linear RUL: clip at a constant beyond which degradation is not yet
@@ -291,13 +325,17 @@ class Config:
         return self.tsfm_context_length if self.tsfm_context_length is not None else self.window_size
 
     def dataset_kind(self) -> str:
-        """'cmapss' or 'xjtu' -- selects the loader in ``data.load_prepared``."""
+        """'cmapss', 'xjtu', or 'ncmapss' -- selects the loader in
+        ``data.load_prepared`` (via the src/datasets/ registry)."""
         if self.dataset in XJTU_DATASETS:
             return "xjtu"
+        if self.dataset in NCMAPSS_DATASETS or self.dataset.startswith("DS"):
+            return "ncmapss"
         if self.dataset.startswith("FD"):
             return "cmapss"
-        raise ValueError(f"unknown dataset {self.dataset!r}; expected FD001-FD004 "
-                         f"or one of {XJTU_DATASETS}")
+        raise ValueError(
+            f"unknown dataset {self.dataset!r}; expected FD001-FD004, "
+            f"one of {XJTU_DATASETS}, or one of {NCMAPSS_DATASETS}")
 
     def effective_condition_norm(self) -> bool:
         """Resolved condition-normalization flag: explicit value, else auto by
@@ -338,6 +376,11 @@ class Config:
         if self.dataset_kind() == "xjtu":  # split protocol changes the data itself
             d["xjtu_test_bearings"] = sorted(self.xjtu_test_bearings)
             d["xjtu_test_truncation"] = self.xjtu_test_truncation
+        if self.dataset_kind() == "ncmapss":  # truncation changes the test data
+            d["ncmapss_test_truncation"] = self.ncmapss_test_truncation
+            if self.dataset == "DSALL":  # which files were unioned defines the dataset
+                d["dsall_datasets"] = (sorted(self.dsall_datasets)
+                                       if self.dsall_datasets is not None else "auto")
         return d
 
     def _embedding_key_fields(self) -> dict:

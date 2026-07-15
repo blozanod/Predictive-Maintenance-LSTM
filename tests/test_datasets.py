@@ -14,7 +14,9 @@ import pytest
 from src.config import Config
 from src import data as D
 from src.datasets.xjtu import XJTU_FEATURE_COLUMNS, load_xjtu
-from tests.synthetic import write_synthetic_cmapss, write_synthetic_xjtu, MockEmbedder
+from src.datasets.ncmapss import load_ncmapss
+from tests.synthetic import (write_synthetic_cmapss, write_synthetic_xjtu,
+                             write_synthetic_ncmapss, MockEmbedder)
 
 
 def _cfg(tmp_path: Path, **over) -> Config:
@@ -269,6 +271,125 @@ def test_xjtu_resolves_one_level_nesting(tmp_path):
     assert DS.is_available(cfg)
     df_train, _, _ = load_xjtu(cfg)
     assert df_train["unit_number"].nunique() == 6
+
+
+# ---------------------------------------------------------------------------
+# §27: N-CMAPSS loader (cycle-aggregated frames, truncation protocol)
+# ---------------------------------------------------------------------------
+def _ncmapss_cfg(root: Path, tmp_path: Path, dataset="DS02", **over) -> Config:
+    base = dict(
+        dataset=dataset, data_root=str(root), data_dir=None,
+        cache_dir=str(tmp_path / "cache"), results_dir=str(tmp_path / "results"),
+        window_size=4, max_rul=125, ncmapss_test_truncation=0.6,
+        num_bins=5, data_unit_counts=[2], sweep_seeds=[0],
+        head_hidden_dim=8, head_max_epochs=2, head_early_stopping_patience=1,
+        baseline_max_epochs=2, baseline_early_stopping_patience=1, losses=["mse"],
+    )
+    base.update(over)
+    return Config(**base)
+
+
+def test_ncmapss_schema_and_split(tmp_path):
+    from src.config import INDEX_COLUMNS, SETTING_COLUMNS, NCMAPSS_FEATURE_COLUMNS
+    write_synthetic_ncmapss(tmp_path / "Data" / "N-CMAPSS", dataset="DS02",
+                            n_dev_units=3, n_test_units=2, seed=1)
+    cfg = _ncmapss_cfg(tmp_path / "Data", tmp_path)
+    df_train, df_test, rul = load_ncmapss(cfg)
+    # canonical frame: one row per (unit, cycle); exact column set/order
+    assert list(df_train.columns) == (list(INDEX_COLUMNS) + list(SETTING_COLUMNS)
+                                      + list(NCMAPSS_FEATURE_COLUMNS))
+    assert len(NCMAPSS_FEATURE_COLUMNS) == 37
+    # dev = train (full length), test disjoint
+    assert df_train["unit_number"].nunique() == 3
+    assert df_test["unit_number"].nunique() == 2
+    assert not set(df_train.unit_number) & set(df_test.unit_number)
+    # time_cycles consecutive from 1; setting_1 = Fc constant per unit ∈ {1,2,3}
+    for _, u in df_train.groupby("unit_number"):
+        cyc = u.sort_values("time_cycles").time_cycles.to_numpy()
+        assert cyc[0] == 1 and np.array_equal(cyc, np.arange(1, len(cyc) + 1))
+        assert u.setting_1.nunique() == 1 and u.setting_1.iloc[0] in (1, 2, 3)
+    # truncation: each test unit kept to max(window, floor(0.6 n)); rul = n - keep
+    assert (rul > 0).all() and np.isfinite(df_test[NCMAPSS_FEATURE_COLUMNS].to_numpy()).all()
+
+
+def test_ncmapss_aggregate_values(tmp_path):
+    """alt_mean / Wf_std / cycle_len_s match a hand computation on the raw arrays
+    (pandas ddof=1 std)."""
+    import h5py
+    ncdir = tmp_path / "Data" / "N-CMAPSS"
+    path = write_synthetic_ncmapss(ncdir, dataset="DS02", n_dev_units=2,
+                                   n_test_units=2, seed=3)
+    with h5py.File(path) as h:
+        W, Xs, A = np.asarray(h["W_dev"]), np.asarray(h["X_s_dev"]), np.asarray(h["A_dev"])
+        wv = [str(x).strip() for x in np.array(h["W_var"]).astype("U20").ravel()]
+        xv = [str(x).strip() for x in np.array(h["X_s_var"]).astype("U20").ravel()]
+    cfg = _ncmapss_cfg(tmp_path / "Data", tmp_path)
+    df_train, _, _ = load_ncmapss(cfg)
+    m = (A[:, 0] == 1) & (A[:, 1] == 1)
+    row = df_train[(df_train.unit_number == 1) & (df_train.time_cycles == 1)].iloc[0]
+    assert np.isclose(row.alt_mean, W[m, wv.index("alt")].mean(), atol=1e-4)
+    assert np.isclose(row.Wf_std, Xs[m, xv.index("Wf")].std(ddof=1), atol=1e-4)
+    assert row.cycle_len_s == m.sum()
+
+
+def test_ncmapss_var_name_mismatch_raises(tmp_path):
+    write_synthetic_ncmapss(tmp_path / "Data" / "N-CMAPSS", dataset="DS03",
+                            rename_sensor="BOGUS", seed=4)
+    cfg = _ncmapss_cfg(tmp_path / "Data", tmp_path, dataset="DS03")
+    with pytest.raises(ValueError, match="do not match"):
+        load_ncmapss(cfg)
+
+
+def test_ncmapss_truncation_in_key_only_for_ncmapss(tmp_path):
+    """ncmapss_test_truncation changes a DS0x window-cache key but NOT an FD001 key."""
+    ds = Config(dataset="DS02", window_size=4)
+    ds2 = ds.replace(ncmapss_test_truncation=0.5)
+    assert ds.window_cache_key() != ds2.window_cache_key()
+    fd = Config(dataset="FD001")
+    fd2 = fd.replace(ncmapss_test_truncation=0.5)
+    assert fd.window_cache_key() == fd2.window_cache_key()
+
+
+def test_ncmapss_aggregate_cache_reused_and_versioned(tmp_path, monkeypatch):
+    write_synthetic_ncmapss(tmp_path / "Data" / "N-CMAPSS", dataset="DS02", seed=1)
+    cfg = _ncmapss_cfg(tmp_path / "Data", tmp_path)
+    load_ncmapss(cfg)   # builds the aggregate cache
+    # second load must NOT reopen the h5
+    import src.datasets.ncmapss as NC
+    monkeypatch.setattr(NC, "_read_and_aggregate",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-parsed h5")))
+    load_ncmapss(cfg)   # served from cache -> no _read_and_aggregate call
+    # bumping the aggregate version forces a rebuild (would call the patched raiser)
+    monkeypatch.setattr(NC, "NCMAPSS_AGG_VERSION", NC.NCMAPSS_AGG_VERSION + 1)
+    with pytest.raises(AssertionError, match="re-parsed h5"):
+        load_ncmapss(cfg)
+
+
+def test_ncmapss_end_to_end_cache_and_sweep(tmp_path):
+    write_synthetic_ncmapss(tmp_path / "Data" / "N-CMAPSS", dataset="DS02",
+                            n_dev_units=3, n_test_units=2, seed=7)
+    cfg = _ncmapss_cfg(tmp_path / "Data", tmp_path)
+    df_train, df_test = D.load_prepared(cfg)     # condition_norm auto-OFF
+    assert not cfg.effective_condition_norm()
+    w, y, u = D.make_windows(df_train, cfg.sensor_columns, cfg.window_size,
+                             target_col="clipped_rul")
+    assert w.shape[1:] == (cfg.window_size, 37)
+    from src.embeddings import build_embedding_cache, load_embedding_cache
+    from src.sweep import run_sweep
+    build_embedding_cache(cfg, embedder=MockEmbedder(feature_dim=12))
+    cache = load_embedding_cache(cfg)
+    assert cache["test_emb"].shape[0] == 2   # one last-context per test unit
+    csv = run_sweep(cfg, device="cpu", baseline_names=["predict_mean", "gbm"])
+    assert Path(csv).exists()
+
+
+def test_ncmapss_registry_and_defaults():
+    from src.config import NCMAPSS_FEATURE_COLUMNS
+    from src import datasets as DS
+    assert Config(dataset="DS03").dataset_kind() == "ncmapss"
+    assert Config(dataset="DS08d").dataset_kind() == "ncmapss"
+    assert Config(dataset="DS02").sensor_columns == list(NCMAPSS_FEATURE_COLUMNS)
+    assert "ncmapss" in DS.DATASET_LOADERS and "ncmapss" in DS.DATASET_FAMILIES
 
 
 # ---------------------------------------------------------------------------

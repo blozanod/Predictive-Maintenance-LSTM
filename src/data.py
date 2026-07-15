@@ -32,6 +32,7 @@ from . import datasets as datasets_pkg
 # in src/datasets/ (one module per dataset family).
 from .datasets.cmapss import load_cmapss  # noqa: F401
 from .datasets.xjtu import load_xjtu  # noqa: F401
+from .datasets.ncmapss import load_ncmapss  # noqa: F401
 
 
 # ---------------------------------------------------------------------------

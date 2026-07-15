@@ -134,6 +134,89 @@ class MockEmbedder:
         return {"embedder": "MockEmbedder", "feature_dim": self.feature_dim, "seed": self.seed}
 
 
+def write_synthetic_ncmapss(
+    data_dir: Path,
+    dataset: str = "DS02",
+    n_dev_units: int = 3,
+    n_test_units: int = 2,
+    min_cycles: int = 10,
+    max_cycles: int = 16,
+    min_rows: int = 15,
+    max_rows: int = 25,
+    seed: int = 0,
+    suffix: str = "-000",
+    rename_sensor: str | None = None,
+) -> Path:
+    """Write a miniature ``N-CMAPSS_<dataset><suffix>.h5`` matching the real key set.
+
+    Structure mirrors src/datasets/ncmapss.py's expectations: ``W_*`` (4 flight-
+    condition channels), ``X_s_*`` (14 measured sensors), ``A_*`` (unit, cycle, Fc, hs),
+    and byte-string ``W_var/X_s_var/A_var``. ``X_v_*``/``T_*``/``Y_*`` are written
+    full-length (random) so the loader is proven to IGNORE the oracle channels even
+    though they are present. Each unit's channels drift toward failure so heads and
+    baselines have learnable signal. Dev/test unit ids are disjoint. ``rename_sensor``
+    swaps one X_s var name to exercise the fail-loud schema check. Returns the path.
+    """
+    import h5py
+
+    from src.config import NCMAPSS_W_VARS, NCMAPSS_XS_VARS
+
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    w_vars = list(NCMAPSS_W_VARS)
+    xs_vars = list(NCMAPSS_XS_VARS)
+    if rename_sensor is not None:
+        xs_vars[0] = rename_sensor
+
+    def _split(unit_ids, flight_classes):
+        W, Xs, A = [], [], []
+        for u, fc in zip(unit_ids, flight_classes):
+            n_cycles = int(rng.integers(min_cycles, max_cycles + 1))
+            for c in range(1, n_cycles + 1):
+                rows = int(rng.integers(min_rows, max_rows + 1))
+                frac = c / n_cycles                       # 0..1 degradation progress
+                w = rng.normal(0.0, 1.0, size=(rows, len(w_vars)))
+                base = rng.normal(500.0, 5.0, size=(1, len(xs_vars)))
+                trend = rng.normal(0.0, 20.0, size=(1, len(xs_vars))) * frac
+                xs = base + trend + rng.normal(0.0, 1.0, size=(rows, len(xs_vars)))
+                W.append(w.astype(np.float32))
+                Xs.append(xs.astype(np.float32))
+                a = np.zeros((rows, 4), np.float32)
+                a[:, 0] = u          # unit
+                a[:, 1] = c          # cycle
+                a[:, 2] = fc         # Fc (flight class, constant per unit)
+                a[:, 3] = 1.0 - frac  # hs (health state, decreasing)
+                A.append(a)
+        return (np.concatenate(W), np.concatenate(Xs), np.concatenate(A))
+
+    dev_units = list(range(1, n_dev_units + 1))
+    test_units = list(range(100, 100 + n_test_units))   # disjoint from dev
+    dev_fc = [1 + (i % 3) for i in range(n_dev_units)]
+    test_fc = [1 + (i % 3) for i in range(n_test_units)]
+    W_dev, Xs_dev, A_dev = _split(dev_units, dev_fc)
+    W_test, Xs_test, A_test = _split(test_units, test_fc)
+
+    def _bytes(names):
+        return np.array([n.encode() for n in names]).reshape(-1, 1)
+
+    path = data_dir / f"N-CMAPSS_{dataset}{suffix}.h5"
+    with h5py.File(path, "w") as h:
+        for tag, (Wd, Xd, Ad) in (("dev", (W_dev, Xs_dev, A_dev)),
+                                  ("test", (W_test, Xs_test, A_test))):
+            h.create_dataset(f"W_{tag}", data=Wd)
+            h.create_dataset(f"X_s_{tag}", data=Xd)
+            h.create_dataset(f"A_{tag}", data=Ad)
+            # Oracle channels the loader must NOT read (present, full-length, random).
+            h.create_dataset(f"X_v_{tag}", data=rng.normal(size=(Wd.shape[0], 5)).astype(np.float32))
+            h.create_dataset(f"T_{tag}", data=rng.normal(size=(Wd.shape[0], 10)).astype(np.float32))
+            h.create_dataset(f"Y_{tag}", data=rng.normal(size=(Wd.shape[0], 1)).astype(np.float32))
+        h.create_dataset("W_var", data=_bytes(w_vars))
+        h.create_dataset("X_s_var", data=_bytes(xs_vars))
+        h.create_dataset("A_var", data=_bytes(["unit", "cycle", "Fc", "hs"]))
+    return path
+
+
 def write_synthetic_xjtu(
     root: Path,
     bearings_per_condition: int = 5,
