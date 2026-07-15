@@ -448,10 +448,146 @@ Follow-ups to the §23 reorg review (four fixes + the run-all button):
   raised-cap arm, transfer) are gated behind `RUN_DEEP_DIVES=False` in the
   Config cell, which now carries the recorded §12 winner as its defaults.
 
+## 25. XJTU-SY condition-3 folder/force fix + unmatched-folder guard
+`XJTU_CONDITIONS` mapped condition 3 to `"40Hz12kN"` at 12 kN. Per the dataset
+documentation (Wang et al. 2020, Table 2) condition 3 is **2400 rpm (40 Hz) / 10 kN**,
+shipped in a folder literally named `40Hz10kN`. The old entry had **both** the folder
+name and the force wrong, so:
+- the folder was never found → condition 3 (bearings 3_1..3_5) never loaded;
+- because the default `xjtu_test_bearings` includes `Bearing3_4/3_5`, `load_xjtu`
+  raised "not on disk" — **XJTU-SY never actually ran**.
+Fixed to `"40Hz10kN": (2, 40.0, 10.0)`. Added `_check_unmatched_conditions`: any
+directory matching `^[\d.]+Hz\d+kN$` that is not a known condition now raises a loud
+`ValueError` naming the folder and the expected set, so a future rename can never again
+silently drop a condition. Stray non-condition dirs (`__MACOSX`, etc.) are ignored.
+**Cache safety:** this changes XJTU data content (condition 3 appears, `setting_3`
+becomes 10.0) but touches no cache-key field. It is safe because **no valid XJTU cache
+could exist** (the old loader raised on the default split); if you built a cache with a
+hand-hacked config, delete `cache/emb_XJTU-SY_*.npz` and `cache/windows_XJTU-SY_*` before
+rerunning.
+
+## 26. Tolerant data-dir resolution: subdir candidates + depth-1 nesting
+Two real-world layout frictions, absorbed so the user never renames or reshuffles a
+downloaded dataset:
+- **Alternate subdir names.** `resolve_data_dir(config, subdir)` now accepts a tuple
+  of candidate names and returns the first that exists under `config.data_root` (else
+  the first candidate, so "not found" errors name the documented path). XJTU declares
+  `("XJTU-SY", "XJTU-SY_Bearing_Datasets")` — the zip's own name loads as-is.
+- **Zip-in-a-folder nesting.** `xjtu._descend_to_conditions` checks the resolved root
+  for the condition folders and, if absent, scans its IMMEDIATE subdirectories
+  (depth-1 only, no recursive walk) for one that holds them, descending with a printed
+  notice. Absorbs `XJTU-SY/XJTU-SY_Bearing_Datasets/35Hz12kN/...`.
+An explicit `config.data_dir` still wins verbatim (tests point it straight at a folder).
+Paths are **not** part of any cache key (§23), so this changes no embeddings/results.
+The same tuple mechanism is reused by the N-CMAPSS loader (§27).
+
+## 27. N-CMAPSS loader (src/datasets/ncmapss.py) — cycle-aggregated frames
+Adds the NASA N-CMAPSS run-to-failure dataset (Arias Chao et al. 2021; one `.h5` per
+sub-dataset DS01–DS08d) into the canonical C-MAPSS-shaped frame, so every downstream
+stage runs unchanged. All choices are `DECISION (uncited)` — there is no community
+*cycle-level* N-CMAPSS protocol.
+- **Cycle aggregation.** The raw data is 1 Hz WITHIN each flight; one flight = one
+  cycle. Each `(unit, cycle)` group is reduced to per-cycle summary statistics:
+  `mean` + `std` of each of the 18 raw channels (4 flight-condition `W` + 14 measured
+  `X_s`), plus `cycle_len_s` = the number of 1 Hz rows in the flight (observable flight
+  duration). **37 channels** = `NCMAPSS_FEATURE_COLUMNS` (config). `std` is pandas'
+  sample std (ddof=1); one-row cycles → NaN → 0.
+- **Oracles excluded.** Virtual sensors `X_v`, health-parameter ground truth `T`, and
+  the per-row RUL `Y` are simulation oracles and are **never read**. RUL is re-derived
+  from cycle counts by `data.add_train_rul`, exactly as for C-MAPSS. The synthetic test
+  fixture writes those keys full-length to prove the loader ignores them.
+- **Channel-name fail-loud.** The decoded `W_var`/`X_s_var` from the file must equal
+  `NCMAPSS_W_VARS`/`NCMAPSS_XS_VARS` *as sets* (the file's order is used for reading);
+  a mismatch raises listing both sets rather than silently reordering.
+- **`setting_1 = Fc`** (flight class 1/2/3, constant per unit); `setting_2/3 = 0`.
+  `condition_norm` resolves **auto-OFF** (flight conditions are continuous, already
+  carried as channels); force `condition_norm=True` for per-flight-class normalization.
+- **Split & truncation.** Train = the file's `*_dev` units (full run-to-failure); test =
+  the file's `*_test` units (preserving the dataset's deliberate distribution shift),
+  truncated at `config.ncmapss_test_truncation` (default 0.6) of life so the predict-at-
+  last-observed-cycle protocol applies — same device as XJTU (§22). `rul_truth` =
+  remaining cycles. New `ncmapss_test_truncation` config field is in the window cache key
+  **only** when `dataset_kind()=="ncmapss"` (FD001/XJTU keys byte-identical to before —
+  verified: `windows_FD001_1da313c871251cec`).
+- **`max_rul` inactive.** N-CMAPSS end-of-life is ~60–100 cycles, so the default cap 125
+  never binds → the target is plain linear RUL (matches N-CMAPSS community practice). Do
+  not "fix" this.
+- **Parsed-frame cache.** Parsing 1–3 GB of h5 is minutes; the aggregate is ~10²–10³
+  rows. Cached to `cache/ncmapss_agg_<ds>_v<NCMAPSS_AGG_VERSION>.npz` (untruncated, so
+  truncation re-applies from config without re-parsing). `NCMAPSS_AGG_VERSION=1` plays
+  the cache-schema role for aggregation logic; the aggregate is otherwise
+  config-independent. The cache is keyed by `ds`+version only (location-independent,
+  like embeddings, §23) — pointing at a different N-CMAPSS directory with the same DS
+  name reuses the cache; delete it to force a re-parse.
+- **Non-comparability warning.** Published N-CMAPSS RMSEs use 1 Hz sub-cycle windows over
+  full test trajectories. These cycle-aggregated, truncation-protocol numbers are **not
+  comparable** to them and must never share a table (role: same-protocol cross-model
+  comparison for RQ1/RQ4, like XJTU-SY).
+- **Registry.** `dataset_kind()` maps `DS*` → `ncmapss`; `datasets/__init__` registers
+  the family; `DEFAULT_SENSOR_COLUMNS["ncmapss"]` = the 37 channels. `h5py>=3.10` added
+  to requirements (core: tests write synthetic h5). The registry-drift test covers the
+  new family automatically.
+
+## 28. DSALL — the combined N-CMAPSS fleet (RQ1 high-data arm)
+**Per-file N-CMAPSS is a LOW-unit dataset** (6–9 dev units): by-unit it sits at the
+*low* end of the data-efficiency sweep, not the high end RESEARCH_PLAN §3 wanted. The
+high-data arm is the **union of every file** — ~100+ units with heterogeneous failure
+modes and flight classes, a realistic mixed fleet. `dataset="DSALL"`:
+- Iterates every resolved member file, each loaded through its own per-file aggregate
+  cache (§27) — so DSALL costs nothing beyond the per-file parses.
+- **Unit renumbering** `file_index*1000 + unit` (collision-proof, reversible:
+  `file_index = uid // 1000`, `unit = uid % 1000`). Each file keeps its dev/test roles
+  and per-unit truncation.
+- **Member determinism.** `config.dsall_datasets` set → EXACTLY those members
+  (reproducible), raising on any non-member name, any named-but-absent file, or fewer
+  than 2 members; the sorted member list joins the window cache key. None → whatever is
+  on disk (≥2 required), keyed literally `"auto"` so an exploration union never
+  masquerades as a fixed dataset. The campaign pins the full list (§30). The resolved
+  members are printed at load and captured in run-metadata via the resolved config.
+- `is_available("DSALL")` requires ≥2 `N-CMAPSS_DS*.h5` present (a 1-file union is just
+  that file). DSALL rows are keyed `dataset="DSALL"` — no schema change (the `dataset`
+  column has been a restart key since §21).
+
+## 29. Unit-count grid auto-appends the full fleet
+`run_sweep` and `run_fairness_baselines` previously **skipped** any
+`n_units > available` (`if n_units > len(all_units): continue`), so a dataset smaller
+than `max(data_unit_counts)` never got a full-data cell — XJTU-SY (9 train bearings)
+ran only {2,5}; N-CMAPSS DS02 (6 dev units) only {2,5}; neither ever reached its own
+full fleet. New `sweep.resolve_unit_counts(counts, available)` returns
+`sorted({n for n in counts if n < available} | {available})` — every requested count
+below the fleet size **plus the full-fleet cell**. Wired into both functions' default
+grid.
+- FD001–FD004 (100 train units, grid max 100): result is exactly the requested grid, so
+  **every existing restart key and recorded result stays valid** (asserted in tests).
+- XJTU-SY → {2,5,9}; DS02 → {2,5,6}; DSALL → {2,5,10,25,50,…,N}.
+- `run_horizon_eval` already defaults `n_units_list` to `[len(all_units)]` (the full
+  fleet) and the campaign passes it all-units, so horizon needed no change.
+Tests: `resolve_unit_counts` unit cases + a 5-train-unit sweep that yields exactly
+{2,5} from `data_unit_counts=[2,50]`. Two pre-existing 8-unit smoke/fairness tests were
+updated (they now legitimately gain the 8-unit full-fleet cell).
+
+## 30. Campaign default overrides + notebook data-layout instructions
+- **`campaign.DEFAULT_DATASET_OVERRIDES`** records per-dataset protocol choices ONCE
+  instead of every notebook re-deciding them: XJTU-SY (`max_rul=125` min, `window_size=30`,
+  `tsfm_context_length=256` — cycles are minutes, §22) and DSALL (`dsall_datasets` pinned
+  to all 10 members for a deterministic cache key, §28). `run_campaign`'s
+  `dataset_overrides` now means: `None` (default) → the recorded defaults; a non-empty
+  dict → merged OVER them per dataset per key (user wins); explicit `{}` → opt out of all
+  overrides. `merge_dataset_overrides` deep-copies so the module constant is never
+  mutated. The per-combo log line prints the resolved override for provenance.
+- **Notebook** (`colab_main.ipynb`): the Config markdown documents the one-`data_root`
+  layout (`Data/CMAPSSData`, `Data/XJTU-SY`, `Data/N-CMAPSS` flat `.h5`), the accepted
+  XJTU folder-name/nesting variants (§26), and the first-run N-CMAPSS aggregate-cache
+  parse (§27). The campaign markdown lists the full dataset set (FD001–FD004 + XJTU-SY +
+  DS01…DS08d + DSALL) and explains the override semantics; the campaign cell now calls
+  `run_campaign(config, device=…)` with the recorded defaults (the old hand-written XJTU
+  override that conflicted with the pinned protocol is removed). Only cells 2–3 changed;
+  the deep-dive sections are untouched.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
-N-CMAPSS (download located — see RESEARCH_PLAN §3 note — but the 20+ GB h5
-loader/downsampling design is its own task; the `datasets/` registry is the slot-in
-point, §23); TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
+TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,
 comparisons, or conclusions are written anywhere (Task 2.5) — recorded winners (§12)
 come only from completed runs.
+
+*(N-CMAPSS moved OUT of this list — implemented in §27; see DATASET_EXPANSION_PLAN.md.)*

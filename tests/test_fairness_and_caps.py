@@ -86,7 +86,11 @@ def test_fairness_baselines_rows_and_restart(tmp_path):
         rows = list(csv.DictReader(f))
     models = {r["model"] for r in rows}
     assert models == {"cycle_reg", "gbm_age"}
-    assert len(rows) == 2 * len(cfg.data_unit_counts) * len(cfg.sweep_seeds)
+    # grid = requested counts below the fleet + the auto-appended full-fleet cell (§29);
+    # 8 train units, data_unit_counts=[2,4] -> {2,4,8}.
+    from src.sweep import resolve_unit_counts
+    n_cells = len(resolve_unit_counts(cfg.data_unit_counts, 8))
+    assert len(rows) == 2 * n_cells * len(cfg.sweep_seeds)
     # predictions respected the clip: metrics finite, floor beats nothing crazy
     assert all(0 < float(r["rmse_clipped"]) < 200 for r in rows)
     run_fairness_baselines(cfg)                          # restart: adds nothing

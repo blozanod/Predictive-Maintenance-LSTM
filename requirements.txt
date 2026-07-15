@@ -8,6 +8,7 @@ pandas>=2.0
 scipy>=1.11
 scikit-learn>=1.3
 torch>=2.1
+h5py>=3.10                # N-CMAPSS .h5 loader (src/datasets/ncmapss.py); tests write synthetic h5
 
 # --- losses / baselines ---
 coral-pytorch>=1.4        # CORN ordinal loss (Shi, Cao & Raschka 2021)

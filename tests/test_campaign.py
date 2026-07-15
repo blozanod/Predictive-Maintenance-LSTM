@@ -13,7 +13,8 @@ matplotlib.use("Agg")
 import pytest
 
 from src.config import Config
-from src.campaign import run_campaign, campaign_experiment_name
+from src.campaign import (run_campaign, campaign_experiment_name,
+                         merge_dataset_overrides, DEFAULT_DATASET_OVERRIDES)
 from tests.synthetic import write_synthetic_cmapss, MockEmbedder
 
 
@@ -75,6 +76,40 @@ def test_campaign_names_and_cross_product(tmp_path):
                  embedder_factory=factory, baseline_names=["predict_mean"])
     n_after = sum(1 for _ in open(by[("FD001", "amazon/chronos-2")]["results_csv"]))
     assert n_after == n_before
+
+
+def test_default_dataset_overrides_merge():
+    """§30: None -> the recorded defaults; a user dict merges over them per key
+    (user wins); an XJTU key without max_rul keeps the default max_rul."""
+    # None -> a copy of the defaults (XJTU protocol pinned; DSALL members pinned)
+    d = merge_dataset_overrides(None)
+    assert d["XJTU-SY"] == DEFAULT_DATASET_OVERRIDES["XJTU-SY"]
+    assert d["DSALL"]["dsall_datasets"][0] == "DS01"
+    # user wins per key; unspecified keys keep the default
+    merged = merge_dataset_overrides({"XJTU-SY": {"max_rul": 60},
+                                      "FD002": {"condition_norm": True}})
+    assert merged["XJTU-SY"]["max_rul"] == 60                 # user override
+    assert merged["XJTU-SY"]["window_size"] == 30            # default preserved
+    assert merged["FD002"] == {"condition_norm": True}       # user-only dataset kept
+    # mutating the result never mutates the module constant
+    merged["XJTU-SY"]["window_size"] = 999
+    assert DEFAULT_DATASET_OVERRIDES["XJTU-SY"]["window_size"] == 30
+
+
+def test_campaign_combo_config_applies_default_overrides(tmp_path):
+    """The per-combo config carries the recorded XJTU protocol (default overrides),
+    and sensor_columns resolves to the dataset default regardless."""
+    from src.campaign import _combo_config, merge_dataset_overrides
+    from src.config import XJTU_FEATURE_COLUMNS
+    base = _base(tmp_path)
+    over = merge_dataset_overrides(None)
+    cfg = _combo_config(base, "XJTU-SY", "amazon/chronos-2", over)
+    assert cfg.max_rul == 125 and cfg.window_size == 30
+    assert cfg.tsfm_context_length == 256
+    assert cfg.sensor_columns == list(XJTU_FEATURE_COLUMNS)   # dataset default
+    # DSALL combo pins the member list (deterministic cache key)
+    dsall = _combo_config(base, "DSALL", "amazon/chronos-2", over)
+    assert dsall.dsall_datasets[0] == "DS01" and len(dsall.dsall_datasets) == 10
 
 
 def test_campaign_isolates_failures_but_raises_when_all_fail(tmp_path):

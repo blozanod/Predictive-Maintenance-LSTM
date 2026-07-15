@@ -114,7 +114,8 @@ def test_cache_is_idempotent_and_sweep_never_reembeds(tmp_path):
                 "rmse_unclipped", "mae_unclipped", "nasa_unclipped"):
         assert col in rows[0]
     for r in rows:
-        assert int(r["n_units"]) in (2, 4)
+        # {2,4} requested; 8 = the auto-appended full-fleet cell (8 train units, §29)
+        assert int(r["n_units"]) in (2, 4, 8)
         assert int(r["schema_version"]) == 2
         assert np.isfinite(float(r["rmse_clipped"]))
         assert np.isfinite(float(r["rmse_unclipped"]))
@@ -132,6 +133,31 @@ def test_cache_is_idempotent_and_sweep_never_reembeds(tmp_path):
     S.run_sweep(cfg, baseline_names=["predict_mean", "cnn", "lstm"], device="cpu")
     n_after = len(list(csv.DictReader(open(results_csv))))
     assert n_after == n_before
+
+
+def test_resolve_unit_counts_appends_full_fleet(tmp_path):
+    """§29: the grid always includes the full-fleet cell; FD-size datasets unchanged."""
+    from src.sweep import resolve_unit_counts
+    # small dataset (9 units): counts above the fleet size collapse to the full cell
+    assert resolve_unit_counts([2, 5, 10, 25, 50, 100], 9) == [2, 5, 9]
+    assert resolve_unit_counts([2, 5], 6) == [2, 5, 6]        # DS02 dev fleet
+    # full-size dataset: exactly the requested grid (no new cells -> keys unchanged)
+    assert resolve_unit_counts([2, 5, 10, 25, 50, 100], 100) == [2, 5, 10, 25, 50, 100]
+    # the max count already equals the fleet -> idempotent
+    assert resolve_unit_counts([2, 4], 4) == [2, 4]
+
+
+def test_sweep_gets_full_fleet_cell_on_small_dataset(tmp_path):
+    """A 5-train-unit dataset with data_unit_counts=[2,50] sweeps exactly {2,5}: the
+    requested 2, plus the auto-appended full-fleet cell (5), and NOT 50."""
+    from src import sweep as S
+    cfg = _smoke_config(tmp_path).replace(data_unit_counts=[2, 50], sweep_seeds=[0],
+                                          losses=["mse"])
+    write_synthetic_cmapss(Path(cfg.data_dir), n_train_units=5, n_test_units=4)
+    E.build_embedding_cache(cfg, embedder=MockEmbedder(feature_dim=16))
+    results_csv = S.run_sweep(cfg, baseline_names=["predict_mean"], device="cpu")
+    rows = list(csv.DictReader(open(results_csv)))
+    assert {int(r["n_units"]) for r in rows} == {2, 5}
 
 
 def test_ablation_runs_and_selects_cell(tmp_path):
