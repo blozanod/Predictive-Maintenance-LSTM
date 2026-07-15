@@ -448,10 +448,28 @@ Follow-ups to the §23 reorg review (four fixes + the run-all button):
   raised-cap arm, transfer) are gated behind `RUN_DEEP_DIVES=False` in the
   Config cell, which now carries the recorded §12 winner as its defaults.
 
+## 25. XJTU-SY condition-3 folder/force fix + unmatched-folder guard
+`XJTU_CONDITIONS` mapped condition 3 to `"40Hz12kN"` at 12 kN. Per the dataset
+documentation (Wang et al. 2020, Table 2) condition 3 is **2400 rpm (40 Hz) / 10 kN**,
+shipped in a folder literally named `40Hz10kN`. The old entry had **both** the folder
+name and the force wrong, so:
+- the folder was never found → condition 3 (bearings 3_1..3_5) never loaded;
+- because the default `xjtu_test_bearings` includes `Bearing3_4/3_5`, `load_xjtu`
+  raised "not on disk" — **XJTU-SY never actually ran**.
+Fixed to `"40Hz10kN": (2, 40.0, 10.0)`. Added `_check_unmatched_conditions`: any
+directory matching `^[\d.]+Hz\d+kN$` that is not a known condition now raises a loud
+`ValueError` naming the folder and the expected set, so a future rename can never again
+silently drop a condition. Stray non-condition dirs (`__MACOSX`, etc.) are ignored.
+**Cache safety:** this changes XJTU data content (condition 3 appears, `setting_3`
+becomes 10.0) but touches no cache-key field. It is safe because **no valid XJTU cache
+could exist** (the old loader raised on the default split); if you built a cache with a
+hand-hacked config, delete `cache/emb_XJTU-SY_*.npz` and `cache/windows_XJTU-SY_*` before
+rerunning.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
-N-CMAPSS (download located — see RESEARCH_PLAN §3 note — but the 20+ GB h5
-loader/downsampling design is its own task; the `datasets/` registry is the slot-in
-point, §23); TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
+TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,
 comparisons, or conclusions are written anywhere (Task 2.5) — recorded winners (§12)
 come only from completed runs.
+
+*(N-CMAPSS moved OUT of this list — implemented in §27; see DATASET_EXPANSION_PLAN.md.)*

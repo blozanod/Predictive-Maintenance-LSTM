@@ -34,6 +34,7 @@ observed cycle" protocol, with provided RUL = remaining minutes at truncation.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -53,12 +54,20 @@ DATASETS = ("XJTU-SY",)
 
 _BASE_FEATURES = list(XJTU_BASE_FEATURES)
 
-# Condition folder -> (index, speed Hz, radial force kN). Folder names as shipped.
+# Condition folder -> (index, speed Hz, radial force kN). Folder names EXACTLY as
+# shipped in XJTU-SY_Bearing_Datasets.zip (Wang et al. 2020, Table 2):
+#   1) 2100 rpm (35 Hz) / 12 kN   2) 2250 rpm (37.5 Hz) / 11 kN
+#   3) 2400 rpm (40 Hz) / 10 kN   <-- 10 kN, folder "40Hz10kN" (NOT 12 kN; CHANGES.md §25)
 XJTU_CONDITIONS = {
     "35Hz12kN": (0, 35.0, 12.0),
     "37.5Hz11kN": (1, 37.5, 11.0),
-    "40Hz12kN": (2, 40.0, 12.0),
+    "40Hz10kN": (2, 40.0, 10.0),
 }
+
+# A directory name that looks like an XJTU condition folder (e.g. "40Hz10kN"): if
+# one is present that is NOT a key of XJTU_CONDITIONS, a condition was renamed or
+# added and must NOT be silently skipped (the pre-§25 bug hid condition 3 this way).
+_CONDITION_DIR_RE = re.compile(r"^[\d.]+Hz\d+kN$")
 
 
 def snapshot_features(x: np.ndarray) -> list[float]:
@@ -100,6 +109,26 @@ def _bearing_frame(bearing_dir: Path, unit_id: int, cond: tuple) -> pd.DataFrame
     return pd.DataFrame(rows, columns=cols)
 
 
+def _check_unmatched_conditions(root: Path) -> None:
+    """Raise if ``root`` holds a condition-LOOKING folder we don't recognize.
+
+    A renamed/added condition folder (e.g. a future "45Hz9kN", or the pre-§25
+    "40Hz12kN" typo) would otherwise be dropped silently -- exactly the bug that
+    hid condition 3 for months. Stray non-condition dirs (``__MACOSX`` etc.) are
+    ignored because they don't match ``_CONDITION_DIR_RE``."""
+    if not root.is_dir():
+        return
+    unmatched = sorted(p.name for p in root.iterdir()
+                       if p.is_dir() and _CONDITION_DIR_RE.match(p.name)
+                       and p.name not in XJTU_CONDITIONS)
+    if unmatched:
+        raise ValueError(
+            f"unrecognized XJTU-SY condition folder(s) {unmatched} under {root}; "
+            f"expected exactly {sorted(XJTU_CONDITIONS)}. A condition was renamed "
+            f"or added -- update XJTU_CONDITIONS (CHANGES.md §25) rather than let "
+            f"it be skipped silently.")
+
+
 def is_available(config: Config) -> bool:
     """Cheap on-disk check: does at least one XJTU-SY condition folder exist?
     (The campaign skips unavailable datasets with a notice, CHANGES.md §24.)"""
@@ -113,6 +142,7 @@ def load_xjtu(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     contract: (df_train, df_test, rul_truth), rul_truth indexed by unit_number =
     remaining cycles (minutes) at each TEST unit's last kept snapshot."""
     root = resolve_data_dir(config, XJTU_SUBDIR)
+    _check_unmatched_conditions(root)
     found = {}
     for cond_name, cond in XJTU_CONDITIONS.items():
         cond_dir = root / cond_name

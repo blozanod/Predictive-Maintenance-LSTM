@@ -208,6 +208,33 @@ def test_xjtu_rejects_bad_split(xjtu_root, tmp_path):
         load_xjtu(cfg)
 
 
+# --- §25: condition-3 folder/force fix + unmatched-folder guard ---
+def test_xjtu_condition3_folder_and_force():
+    """Regression: condition 3 is "40Hz10kN" at 10 kN, NOT the pre-§25
+    "40Hz12kN"/12 kN typo that silently hid the whole condition."""
+    from src.datasets.xjtu import XJTU_CONDITIONS
+    assert XJTU_CONDITIONS["40Hz10kN"] == (2, 40.0, 10.0)
+    assert "40Hz12kN" not in XJTU_CONDITIONS
+    # the loader must actually surface all 3 conditions now
+    assert {c[0] for c in XJTU_CONDITIONS.values()} == {0, 1, 2}
+
+
+def test_xjtu_unmatched_condition_folder_raises(xjtu_root, tmp_path):
+    """A condition-looking folder that isn't recognized must fail loudly, naming
+    both the offending folder and the expected set."""
+    stray = xjtu_root / "45Hz9kN" / "Bearing4_1"
+    stray.mkdir(parents=True, exist_ok=True)
+    (stray / "1.csv").write_text(
+        "Horizontal_vibration_signals,Vertical_vibration_signals\n0.1,0.1\n")
+    try:
+        cfg = _xjtu_cfg(xjtu_root, tmp_path)
+        with pytest.raises(ValueError, match="45Hz9kN"):
+            load_xjtu(cfg)
+    finally:
+        import shutil
+        shutil.rmtree(xjtu_root / "45Hz9kN")
+
+
 # ---------------------------------------------------------------------------
 # §24 fixes: registry consistency, sensor-column defaults, experiment_name guard
 # ---------------------------------------------------------------------------
