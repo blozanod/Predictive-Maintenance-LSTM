@@ -151,6 +151,9 @@ def _aggregate_split(W, X_s, A, w_var, xs_var) -> np.ndarray:
     for j, v in enumerate(_CONFIG_VARS):
         feat[:, 2 * j] = means[v].to_numpy()
         feat[:, 2 * j + 1] = stds[v].to_numpy()
+    # DECISION (uncited): cycle_len_s (rows per flight) is an observable, deployment-
+    # legitimate covariate (flight duration); the §19 age-confound arms bound "cheap
+    # covariate" critiques. CHANGES.md §27.
     feat = np.concatenate([feat, counts[:, None]], axis=1)   # + cycle_len_s
 
     midx = means.index

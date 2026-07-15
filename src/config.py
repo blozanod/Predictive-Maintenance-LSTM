@@ -90,8 +90,10 @@ NCMAPSS_DATASETS = ("DS01", "DS02", "DS03", "DS04", "DS05", "DS06", "DS07",
 # N-CMAPSS channel schema. W = flight-condition scenario descriptors (4), X_s =
 # measured sensors (14); virtual sensors X_v, health params T, and per-row RUL Y are
 # simulation ORACLES and are never read (CHANGES.md §27). Names/order are asserted
-# against the file's decoded *_var arrays at load time (fail loud on drift). Per-cycle
-# features = mean+std of each of the 18 raw channels, plus cycle length in seconds.
+# against the file's decoded *_var arrays at load time (fail loud on drift).
+# DECISION (uncited): per-cycle features = mean+std of each of the 18 raw channels plus
+# cycle_len_s (flight duration) -- the cycle-level indicator-trend formulation (no
+# community-standard cycle-level N-CMAPSS protocol exists; CHANGES.md §27).
 NCMAPSS_W_VARS = ("alt", "Mach", "TRA", "T2")
 NCMAPSS_XS_VARS = ("T24", "T30", "T48", "T50", "P15", "P2", "P21", "P24",
                    "Ps30", "P40", "P50", "Nf", "Nc", "Wf")
@@ -135,10 +137,12 @@ class Config:
     deterministic: bool = True  # torch deterministic algorithms where feasible (Task 2.3)
 
     # ---- dataset -----------------------------------------------------------
-    # C-MAPSS "FD001".."FD004" or "XJTU-SY" bearings. The raw files live under ONE
-    # ``data_root`` folder, one subdirectory per dataset family, resolved by the
-    # loader registry (src/datasets/): FD00x -> ``data_root/CMAPSSData``, XJTU-SY ->
-    # ``data_root/XJTU-SY`` (the 3 condition folders; see src/datasets/xjtu.py).
+    # C-MAPSS "FD001".."FD004", "XJTU-SY" bearings, or N-CMAPSS "DS01".."DS08d" /
+    # "DSALL" (the combined fleet). The raw files live under ONE ``data_root`` folder,
+    # one subdirectory per dataset family, resolved by the loader registry
+    # (src/datasets/): FD00x -> ``data_root/CMAPSSData``, XJTU-SY -> ``data_root/XJTU-SY``
+    # (3 condition folders; src/datasets/xjtu.py), DS0x/DSALL -> ``data_root/N-CMAPSS``
+    # (.h5 per sub-dataset; src/datasets/ncmapss.py).
     dataset: str = "FD001"
     # One root housing every dataset (config.data_root/<subdir>). ``data_dir``
     # overrides this with an explicit, dataset-specific path when set (tests point it
@@ -168,7 +172,7 @@ class Config:
     # The file's own *_test units are run-to-failure (RUL hits 0 at the last row); to
     # match the pipeline's predict-at-last-observed-cycle protocol each test unit is
     # truncated at this life fraction (same device as XJTU, §22). ncmapss-only cache-
-    # key field.
+    # key field. DECISION (uncited): 0.6 mirrors the XJTU default; no community standard.
     ncmapss_test_truncation: float = 0.6
     # DSALL member list (§28): which per-file DS0x datasets the combined fleet unions.
     # None => whatever N-CMAPSS_DS*.h5 is on disk at load time (keyed "auto" -- for

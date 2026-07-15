@@ -11,7 +11,9 @@ centerpiece. **The plan is the source of truth**; deviations are logged in
 ```
 Data/            One root housing every raw dataset (config.data_root); only the
   CMAPSSData/    small C-MAPSS text files are committed. Drop XJTU-SY (Data/XJTU-SY/)
-                 and other large datasets here — they are git-ignored.
+  XJTU-SY/       and N-CMAPSS (Data/N-CMAPSS/, the .h5 files flat) here — they are
+  N-CMAPSS/      git-ignored. XJTU-SY also loads under its zip name
+                 (XJTU-SY_Bearing_Datasets) or one nesting level down.
 src/
   config.py      Single Config dataclass: seeds, max_rul, window, tsfm_context_length,
                  head_features, pooling, unit-count grid, paths (data_root +
@@ -21,8 +23,11 @@ src/
                  "DECISION (uncited)".
   datasets/      Raw loaders, one module per dataset family, behind a registry:
     cmapss.py    C-MAPSS FD001–FD004 (subdir CMAPSSData); xjtu.py XJTU-SY bearings
-    xjtu.py      (subdir XJTU-SY). __init__.load_raw dispatches by config.dataset_kind();
-                 base.resolve_data_dir maps data_root + subdir (or a data_dir override).
+    xjtu.py      (subdir XJTU-SY); ncmapss.py N-CMAPSS DS01–DS08d + the combined
+    ncmapss.py   DSALL fleet (subdir N-CMAPSS, .h5 → per-cycle aggregates, cached).
+                 __init__.load_raw dispatches by config.dataset_kind();
+                 base.resolve_data_dir maps data_root + subdir candidates (or a
+                 data_dir override), tolerating alternate names + one nesting level.
   data.py        Preprocessing hub + the unified load_prepared entry point: RUL labels +
                  clipping, condition-wise normalization, unit-level train/val split,
                  by-unit seeded subsampling, fixed windowing (label at window end),
@@ -71,13 +76,15 @@ Open `notebooks/colab_main.ipynb` and hit **Run all** (CHANGES.md §24):
 
 1. **Setup** — installs, mount Drive, add repo to `sys.path`, print GPU.
 2. **Config** — point `data_root`/`cache_dir`/`results_dir` at your Drive (raw
-   datasets live under one `data_root`, e.g. `Data/CMAPSSData`, `Data/XJTU-SY`).
-   Defaults are the recorded FD001 ablation winner (CHANGES.md §12).
-3. **Campaign** — `run_campaign(config)`: every dataset in `src/datasets/` × every
+   datasets live under one `data_root`: `Data/CMAPSSData`, `Data/XJTU-SY`,
+   `Data/N-CMAPSS`). Defaults are the recorded FD001 ablation winner (CHANGES.md §12).
+3. **Campaign** — `run_campaign(config)`: every dataset in `src/datasets/`
+   (FD001–FD004 + XJTU-SY + N-CMAPSS DS01–DS08d + the combined DSALL fleet) × every
    TSFM in `src/models/`; per combo it runs Stage A cache → data-scaling sweep →
-   fairness arms → horizon eval → saved figures, each stage restartable. Datasets
-   not downloaded into `Data/` are skipped with a notice; every artifact is named
-   `<dataset>_<model>_…` (e.g. `results/FD002_chronos-2_results_v2.csv`).
+   fairness arms → horizon eval → saved figures, each stage restartable. Per-dataset
+   protocol choices come from `campaign.DEFAULT_DATASET_OVERRIDES` (CHANGES.md §30).
+   Datasets not downloaded into `Data/` are skipped with a notice; every artifact is
+   named `<dataset>_<model>_…` (e.g. `results/FD002_chronos-2_results_v2.csv`).
 4. **Deep-dives** (optional; set `RUN_DEEP_DIVES = True` in the Config cell) —
    the single-dataset studies: the context/feature ablation, learning curves, the
    CORN-vs-MSE paired-significance table, the raised-label-cap arm (max_rul=200),
