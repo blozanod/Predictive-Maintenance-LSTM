@@ -48,11 +48,14 @@ DEFAULT_DATASET_OVERRIDES = {
     # bearings degrade over ~42 min-42 h); window_size=30 minutes; tsfm_context_length=
     # 256 mirrors the recorded §12 winner shape.
     "XJTU-SY": {"max_rul": 125, "window_size": 30, "tsfm_context_length": 256},
-    # DSALL: pin the member list so its cache key is deterministic once every file is
-    # downloaded (§28). Absent members raise, so this is safe to leave set -- a partial
-    # download surfaces loudly rather than silently unioning a different fleet.
+    # DSALL: pin the member list so its cache key is deterministic (§28). Absent members
+    # raise (a partial download surfaces loudly rather than silently unioning a different
+    # fleet), so the pin lists only the files that are reliably obtainable. DS08d
+    # (~2.9 GB, the largest N-CMAPSS file) is EXCLUDED because it truncates on download
+    # and is frequently unavailable (CHANGES §31); add it back here once a verified copy
+    # is on disk to include it in the fleet.
     "DSALL": {"dsall_datasets": ["DS01", "DS02", "DS03", "DS04", "DS05", "DS06",
-                                 "DS07", "DS08a", "DS08c", "DS08d"]},
+                                 "DS07", "DS08a", "DS08c"]},
 }
 
 

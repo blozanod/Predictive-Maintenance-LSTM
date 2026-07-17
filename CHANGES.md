@@ -584,6 +584,23 @@ updated (they now legitimately gain the 8-unit full-fleet cell).
   override that conflicted with the pinned protocol is removed). Only cells 2–3 changed;
   the deep-dive sections are untouched.
 
+## 31. DSALL default excludes DS08d (unavailable large file)
+`N-CMAPSS_DS08d-010.h5` (~2.9 GB, the largest sub-dataset) truncates on download and is
+frequently not obtainable in full. Because `campaign.DEFAULT_DATASET_OVERRIDES` pinned
+DSALL's members to all 10 files (§30) and a pinned-but-absent member **raises**
+(`resolve_dsall_members`, §28), a missing/corrupt DS08d made **DSALL fail entirely** rather
+than skip — the RQ1 high-data arm never ran. The default pin is now the **9 reliably
+available files** (DS01–DS07 + DS08a + DS08c); DSALL unions those into its ~60+-unit fleet.
+- **Per-file DS08d** is unaffected: when the file is absent the campaign skips that combo
+  with the standard "not downloaded" notice (`is_available` globs the exact name), and runs
+  it normally if a verified copy appears.
+- **Cache/reproducibility:** this changes DSALL's member list, hence its window cache key
+  (the sorted member list joins the key, §28) — correct, since **no valid DSALL cache exists**
+  (DSALL never completed). To include DS08d later, add `"DS08d"` back to the DSALL pin in
+  `campaign.py` once a verified copy is on disk; that is a deliberate new dataset (new key),
+  not a silent change. No other dataset, cache key, or CSV schema is affected; the FD001 keys
+  remain byte-identical.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,

@@ -95,14 +95,18 @@ run-and-write.
 
 ---
 
-## 2. Task 1 — Fix DS08d, run DSALL  [user, then agent]
+## 2. Task 1 — Run DSALL (DS08d excluded)  [user, then agent]
 
-**[user-on-Colab]** Re-download `N-CMAPSS_DS08d-*.h5` into `Data/N-CMAPSS/` (the current file is
-truncated; verify `h5py.File(path).keys()` opens without `OSError`). Delete any partial
-`cache/ncmapss_agg_DS08d_*.npz`. Then re-run the campaign cell — every stage is restartable, so
-only DS08d and DSALL execute; DSALL reuses the nine existing per-file aggregate caches (§27),
-so it is cheap. Report back: `DS08d_chronos-2_results_v2.csv`, `DSALL_chronos-2_results_v2.csv`,
-and both horizon CSVs.
+**Resolved as of CHANGES §31:** DS08d (~2.9 GB) truncates on download and is not reliably
+obtainable, so the DSALL default pin now excludes it (9 members: DS01–DS07 + DS08a + DS08c).
+DSALL no longer fails on the missing file. **Do not block on DS08d** — it is optional; if a
+verified full copy appears later, add `"DS08d"` back to the DSALL pin in `campaign.py` (a
+deliberate new-key run, not a silent change).
+
+**[user-on-Colab]** Re-run the campaign cell — every stage is restartable, so only DSALL
+executes; it reuses the nine existing per-file aggregate caches (§27), so it is cheap. Report
+back: `DSALL_chronos-2_results_v2.csv` and both horizon CSVs. (The per-file DS08d combo simply
+reports `skipped_no_data` and needs no action.)
 
 **[agent]** Nothing to code unless the DSALL member-pinning needs adjustment (it should not —
 `DEFAULT_DATASET_OVERRIDES` already pins all 10 members, §30). **Analysis deliverable:** extend
