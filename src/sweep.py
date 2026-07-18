@@ -30,7 +30,7 @@ from . import baselines as baselines_mod
 from .features import HeadFeatureBuilder, raw_last_cycle
 from .evaluate import (
     evaluate_predictions, append_result_row, completed_cells, save_run_metadata,
-    archive_results_v1, RESULTS_SCHEMA_VERSION,
+    archive_results_v1, guard_random_truncation_namespacing, RESULTS_SCHEMA_VERSION,
 )
 
 # Completed-cell keys. The main sweep is one config per file, so the config axes are
@@ -174,6 +174,7 @@ def run_sweep(
     to ``results_v2.csv`` (both-protocol metrics). Restartable."""
     from .embeddings import load_embedding_cache  # local import: no embedder needed
 
+    guard_random_truncation_namespacing(config)
     if cache is None:
         cache = load_embedding_cache(config)
     run_dir = Path(run_dir) if run_dir else config.results_path("runs")
@@ -361,6 +362,7 @@ def run_baseline_window_comparison(
     and write both-protocol metrics, so the better per-baseline window can be adopted
     via ``config.baseline_windows`` (equal-tuning-budget fairness, RESEARCH_PLAN
     sec.6). Windows are built from the raw series (no embedding needed)."""
+    guard_random_truncation_namespacing(config)
     windows = windows or [config.window_size, 120]
     baseline_names = baseline_names or ["gbm", "lstm"]
     seeds = seeds or [0, 1, 2]
@@ -415,6 +417,7 @@ def run_fairness_baselines(
     Known caveat (as for all fixed-window baselines, §14): front-padding short
     test units repeats the first cycle's ``time_cycles``; the LAST value -- the
     true age at prediction time -- is always real. Restartable; CPU-only."""
+    guard_random_truncation_namespacing(config)
     results_csv = Path(results_csv) if results_csv else config.results_path("results_v2.csv")
     seeds = seeds if seeds is not None else list(config.sweep_seeds)
 

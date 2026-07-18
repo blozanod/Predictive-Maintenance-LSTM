@@ -129,6 +129,30 @@ def save_run_metadata(config: Config, path: str | Path, repo_dir: str | Path = "
 # ---------------------------------------------------------------------------
 # Results CSV (data-scaling curve rows) with completed-cell detection
 # ---------------------------------------------------------------------------
+def guard_random_truncation_namespacing(config: Config) -> None:
+    """Random-truncation runs (protocol v2, §32) must land in an experiment-namespaced
+    results file. The results_v2 restart key is (model, dataset, n_units, seed, loss) --
+    it carries NO truncation-mode axis -- so appending random-mode rows into a file that
+    already holds fixed-mode rows for the same cells would let the fixed rows mask the
+    random ones (skipped as 'done'). Requiring a non-empty ``experiment_name`` routes
+    random-mode outputs to a separate ``<experiment_name>_*.csv`` (``config.results_path``
+    prefixes it), so every recorded fixed-mode run stays byte-identical and the two arms
+    never collide. No-op for fixed mode and for C-MAPSS (which never truncates).
+
+    DECISION (uncited): requiring experiment_name namespacing (rather than adding a
+    truncation-mode column to results_v2 / a new restart-key axis) keeps every recorded
+    CSV schema and cache key untouched -- the least-invasive coexistence (CHANGES.md §32)."""
+    if (config.test_truncation_mode == "random"
+            and config.dataset_kind() in ("xjtu", "ncmapss")
+            and not config.experiment_name):
+        raise ValueError(
+            "test_truncation_mode='random' requires a non-empty config.experiment_name so "
+            "its results land in a separate '<experiment_name>_*.csv' and never collide "
+            "with recorded fixed-truncation rows (the results_v2 restart key has no "
+            "truncation-mode axis). Set experiment_name in the protocol-v2 notebook's "
+            "Config cell (CHANGES.md §32).")
+
+
 def append_result_row(csv_path: str | Path, row: dict) -> None:
     """Append one metrics row, writing a header if the file is new. Used to
     checkpoint the sweep after every grid cell (Task 3, Stage B)."""

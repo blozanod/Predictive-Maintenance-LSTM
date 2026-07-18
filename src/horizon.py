@@ -40,7 +40,7 @@ from . import baselines as baselines_mod
 from .features import HeadFeatureBuilder, raw_last_cycle
 from .evaluate import (
     rmse, mae, nasa_score, append_result_row, completed_cells, save_run_metadata,
-    ensure_csv_schema, RESULTS_SCHEMA_VERSION,
+    ensure_csv_schema, guard_random_truncation_namespacing, RESULTS_SCHEMA_VERSION,
 )
 
 # max_rul is a cell key so the label-cap arms (e.g. 125 vs 200, CHANGES.md §18)
@@ -186,6 +186,7 @@ def run_horizon_eval(
     from .embeddings import load_embedding_cache
     from .sweep import _to_device_cache
 
+    guard_random_truncation_namespacing(config)
     if cache is None:
         cache = load_embedding_cache(config)
     if hcache is None:

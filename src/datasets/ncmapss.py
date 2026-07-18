@@ -31,9 +31,11 @@ normalization; the default stays OFF.
 
 Split & test protocol (DECISION, uncited -- CHANGES.md §27): train = the file's
 ``*_dev`` units (full run-to-failure); test = the file's ``*_test`` units, TRUNCATED
-at ``config.ncmapss_test_truncation`` of their life (same device as XJTU, §22) so the
-pipeline's predict-at-last-observed-cycle protocol applies; provided RUL = remaining
-cycles at truncation. ``max_rul`` (default 125) is effectively INACTIVE here (N-CMAPSS
+at a life fraction (same device as XJTU, §22) so the pipeline's predict-at-last-observed-
+cycle protocol applies; provided RUL = remaining cycles at truncation. The fraction is
+``config.ncmapss_test_truncation`` under the default ``test_truncation_mode="fixed"``, or a
+per-unit random draw from ``config.test_truncation_range`` under ``"random"`` (protocol v2,
+§32), which restores test-RUL variance so ``predict_mean`` is no longer near-optimal. ``max_rul`` (default 125) is effectively INACTIVE here (N-CMAPSS
 end-of-life is ~60-100 cycles, so the piecewise cap never binds -> plain linear RUL,
 which matches N-CMAPSS community practice).
 
@@ -53,7 +55,7 @@ import pandas as pd
 from ..config import (Config, INDEX_COLUMNS, SETTING_COLUMNS,
                       NCMAPSS_DATASETS, NCMAPSS_W_VARS, NCMAPSS_XS_VARS,
                       NCMAPSS_FEATURE_COLUMNS)
-from .base import resolve_data_dir
+from .base import resolve_data_dir, resolve_truncation_fraction
 
 # Accepted subdirectory name(s) of ``config.data_root`` holding the .h5 files (flat).
 NCMAPSS_SUBDIR = ("N-CMAPSS",)
@@ -228,15 +230,19 @@ def _load_or_build_aggregate(config: Config, ds: str, verbose: bool = True
 # ---------------------------------------------------------------------------
 # Truncation (test units are run-to-failure; mirror XJTU's protocol, §22)
 # ---------------------------------------------------------------------------
-def _truncate_test(df_test_full: pd.DataFrame, config: Config
+def _truncate_test(df_test_full: pd.DataFrame, config: Config, member_dataset: str
                    ) -> tuple[pd.DataFrame, dict]:
-    """Truncate each test unit at ``ncmapss_test_truncation`` of its life; return the
-    truncated frame and ``{unit: remaining_cycles}``. Same guards as XJTU."""
+    """Truncate each test unit at its life fraction (fixed ``ncmapss_test_truncation``,
+    or a per-unit random draw under protocol v2, §32); return the truncated frame and
+    ``{unit: remaining_cycles}``. Same guards as XJTU. ``member_dataset`` keys the random
+    draw on the actual file (e.g. "DS02") so DSALL's reused raw unit ids never collide."""
     frames, rul = [], {}
     for unit_id, unit_df in df_test_full.groupby("unit_number", sort=True):
         unit_df = unit_df.sort_values("time_cycles")
         n = len(unit_df)
-        keep = int(np.floor(n * config.ncmapss_test_truncation))
+        frac = resolve_truncation_fraction(config, member_dataset, unit_id,
+                                           config.ncmapss_test_truncation)
+        keep = int(np.floor(n * frac))
         keep = max(config.window_size, min(keep, n - 1))
         if keep < 1 or keep >= n:
             raise ValueError(
@@ -257,7 +263,7 @@ def load_ncmapss(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]
     if config.dataset == "DSALL":
         return _load_dsall(config)
     df_train, df_test_full = _load_or_build_aggregate(config, config.dataset)
-    df_test, rul = _truncate_test(df_test_full, config)
+    df_test, rul = _truncate_test(df_test_full, config, config.dataset)
     rul_truth = pd.Series(rul, name="rul_truth").sort_index()
     rul_truth.index.name = "unit_number"
     return df_train, df_test, rul_truth
@@ -330,7 +336,7 @@ def _load_dsall(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     train_frames, test_frames, rul = [], [], {}
     for file_index, ds in enumerate(members):
         df_train_full, df_test_full = _load_or_build_aggregate(config, ds)
-        df_test, ds_rul = _truncate_test(df_test_full, config)
+        df_test, ds_rul = _truncate_test(df_test_full, config, ds)
         offset = file_index * _DSALL_UNIT_STRIDE
         for df in (df_train_full, df_test):
             df["unit_number"] = df["unit_number"] + offset

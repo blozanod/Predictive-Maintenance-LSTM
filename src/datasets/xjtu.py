@@ -25,9 +25,11 @@ downstream of ``data.load_prepared`` runs unchanged):
 
 Split protocol (DECISION, uncited -- no community standard; CHANGES.md §22):
 ``config.xjtu_test_bearings`` (default the last 2 of 5 per condition) are held
-out; each test bearing is truncated at ``config.xjtu_test_truncation`` of its
-life (>= window_size cycles kept) to mimic the C-MAPSS "predict at the last
-observed cycle" protocol, with provided RUL = remaining minutes at truncation.
+out; each test bearing is truncated (>= window_size cycles kept) to mimic the
+C-MAPSS "predict at the last observed cycle" protocol, with provided RUL =
+remaining minutes at truncation. The truncation fraction is ``config.xjtu_test_truncation``
+under the default ``test_truncation_mode="fixed"``, or a per-unit random draw from
+``config.test_truncation_range`` under ``"random"`` (protocol v2, §32).
 ``max_rul`` is in MINUTES here; the FD-convention 125 is arbitrary for bearings
 (lifetimes span ~35 min to ~42 h) -- set it deliberately per experiment.
 """
@@ -44,7 +46,7 @@ import pandas as pd
 # per-dataset sensor-column defaults there without an import cycle) and are
 # re-exported here, where the features are computed.
 from ..config import Config, XJTU_BASE_FEATURES, XJTU_FEATURE_COLUMNS
-from .base import resolve_data_dir
+from .base import resolve_data_dir, resolve_truncation_fraction
 
 # Accepted subdirectory names of ``config.data_root`` holding the 3 XJTU-SY
 # condition folders. The documented layout is ``XJTU-SY``; the zip ships as
@@ -193,8 +195,11 @@ def load_xjtu(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
         if name in config.xjtu_test_bearings:
             n = len(frame)
             # keep >= window_size cycles so the unit yields at least one window,
-            # and always truncate at least 1 cycle so RUL truth is > 0.
-            keep = int(np.floor(n * config.xjtu_test_truncation))
+            # and always truncate at least 1 cycle so RUL truth is > 0. The fraction is
+            # fixed (``xjtu_test_truncation``) or a per-unit random draw (protocol v2, §32).
+            frac = resolve_truncation_fraction(config, config.dataset, unit_id,
+                                               config.xjtu_test_truncation)
+            keep = int(np.floor(n * frac))
             keep = max(config.window_size, min(keep, n - 1))
             if keep < 1 or keep >= n:
                 raise ValueError(

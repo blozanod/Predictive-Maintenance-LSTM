@@ -478,6 +478,132 @@ def test_experiment_name_guard():
             Config(experiment_name=bad)
 
 
+# ---------------------------------------------------------------------------
+# §32: randomized test-truncation protocol (protocol v2) for XJTU-SY / N-CMAPSS
+# ---------------------------------------------------------------------------
+def test_test_truncation_validation_and_default():
+    """Mode defaults to fixed (recorded protocol); bad mode/range fail loud."""
+    assert Config().test_truncation_mode == "fixed"
+    assert Config().test_truncation_range == (0.4, 0.9)
+    with pytest.raises(ValueError, match="test_truncation_mode"):
+        Config(test_truncation_mode="bogus")
+    for bad in [(0.9, 0.4), (0.0, 0.9), (0.4, 1.0), (0.5, 0.5)]:
+        with pytest.raises(ValueError, match="test_truncation_range"):
+            Config(test_truncation_range=bad)
+
+
+def test_random_truncation_rekeys_only_truncation_datasets():
+    """Random mode re-keys N-CMAPSS/XJTU caches (seed and range each matter) but
+    leaves every C-MAPSS key byte-identical -- the mode is meaningless there."""
+    fd = Config(dataset="FD001")
+    assert fd.window_cache_key() == fd.replace(test_truncation_mode="random").window_cache_key()
+    assert (fd.embedding_cache_key()
+            == fd.replace(test_truncation_mode="random").embedding_cache_key())
+    for dsname, ws in (("DS02", 4), ("XJTU-SY", 6)):
+        c = Config(dataset=dsname, window_size=ws)
+        r = c.replace(test_truncation_mode="random")
+        assert c.window_cache_key() != r.window_cache_key()
+        assert r.window_cache_key() != r.replace(test_truncation_seed=1).window_cache_key()
+        assert r.window_cache_key() != r.replace(test_truncation_range=(0.3, 0.8)).window_cache_key()
+
+
+def test_truncation_fraction_helper():
+    """The shared seeded fraction: fixed = passthrough; random = deterministic,
+    in-range, varied across units AND member files (the DSALL-collision guard),
+    and independent of the ignored fixed-fraction argument."""
+    from src.datasets.base import resolve_truncation_fraction as frac
+    fixed = Config(dataset="DS02")
+    assert frac(fixed, "DS02", 100, 0.6) == 0.6
+    rnd = Config(dataset="DS02", test_truncation_mode="random",
+                 test_truncation_range=(0.4, 0.9))
+    a = frac(rnd, "DS02", 100, 0.6)
+    assert a == frac(rnd, "DS02", 100, 0.6) and 0.4 <= a <= 0.9   # deterministic, in range
+    assert frac(rnd, "DS02", 101, 0.6) != a                       # varies across units
+    assert frac(rnd, "DS03", 100, 0.6) != a                       # varies across member files
+    assert frac(rnd, "DS02", 100, 0.5) == a                       # ignores fixed-frac arg
+
+
+def test_ncmapss_random_truncation_varies_and_is_deterministic(tmp_path):
+    """On the same fleet, fixed truncation puts every unit at ~0.6 of life while
+    random spreads them across the range; the draw is reproducible and seed-sensitive."""
+    write_synthetic_ncmapss(tmp_path / "Data" / "N-CMAPSS", dataset="DS02",
+                            n_dev_units=2, n_test_units=6, min_cycles=25,
+                            max_cycles=40, seed=5)
+    fixed = _ncmapss_cfg(tmp_path / "Data", tmp_path)
+    rand = fixed.replace(test_truncation_mode="random", test_truncation_range=(0.4, 0.9))
+
+    def realized(cfg):
+        _, df_test, rul = load_ncmapss(cfg)
+        # rul = full_life - kept  =>  full_life = kept + rul  =>  fraction = kept/full
+        fr = {u: int((df_test.unit_number == u).sum())
+                 / (int((df_test.unit_number == u).sum()) + int(r))
+              for u, r in rul.items()}
+        return np.array([fr[u] for u in sorted(fr)]), dict(rul)
+
+    rf, _ = realized(fixed)
+    rr, rul_r = realized(rand)
+    assert rf.std() < 0.03                                   # fixed: all ~0.6
+    assert rr.std() > 0.08                                   # random: genuinely spread
+    assert rr.min() >= 0.4 - 1e-6 and rr.max() <= 0.9 + 1e-6  # within the configured range
+    assert realized(rand)[1] == rul_r                        # deterministic on reload
+    seed99 = rand.replace(test_truncation_seed=99)
+    assert realized(seed99)[1] != rul_r                      # a new seed re-draws
+
+
+def test_dsall_random_truncation_keys_per_member_file(tmp_path):
+    """DSALL reuses raw unit ids across files; random truncation keys on the member
+    file so two different engines with the same raw id never share a fraction."""
+    from src.datasets.base import resolve_truncation_fraction as frac
+    _write_two_ds(tmp_path / "Data" / "N-CMAPSS")     # DS02 & DS03 each have test units 100,101
+    cfg = _ncmapss_cfg(tmp_path / "Data", tmp_path, dataset="DSALL",
+                       dsall_datasets=["DS02", "DS03"],
+                       test_truncation_mode="random", test_truncation_range=(0.4, 0.9))
+    assert frac(cfg, "DS02", 100, 0.6) != frac(cfg, "DS03", 100, 0.6)
+    _, _, rul = load_ncmapss(cfg)
+    assert (rul > 0).all()
+    assert set(rul.index) == {100, 101, 1100, 1101}   # renumbered, independent draws
+
+
+def test_xjtu_random_truncation_varies_and_is_deterministic(xjtu_root, tmp_path):
+    fixed = _xjtu_cfg(xjtu_root, tmp_path)
+    rand = fixed.replace(test_truncation_mode="random", test_truncation_range=(0.4, 0.9))
+    _, _, rul_f = load_xjtu(fixed)
+    _, _, rul_r = load_xjtu(rand)
+    assert (rul_r > 0).all()
+    assert dict(rul_f) != dict(rul_r)          # at least one bearing truncated differently
+    assert dict(load_xjtu(rand)[2]) == dict(rul_r)   # deterministic on reload
+
+
+def test_random_truncation_namespacing_guard():
+    """The guard forces random-mode results into an experiment-namespaced file so they
+    can never mask recorded fixed-mode rows (which share the results_v2 restart key)."""
+    from src.evaluate import guard_random_truncation_namespacing as guard
+    for ds in ("DS02", "XJTU-SY"):
+        with pytest.raises(ValueError, match="experiment_name"):
+            guard(Config(dataset=ds, test_truncation_mode="random"))
+        guard(Config(dataset=ds, test_truncation_mode="random", experiment_name="p2"))
+    guard(Config(dataset="DS02"))                                 # fixed -> no-op
+    guard(Config(dataset="FD001", test_truncation_mode="random")) # C-MAPSS never truncates
+
+
+def test_ncmapss_random_sweep_requires_and_uses_experiment_name(tmp_path):
+    """End-to-end: random sweep without experiment_name is refused before any work;
+    with one, it runs and writes a namespaced results CSV."""
+    from src.embeddings import build_embedding_cache
+    from src.sweep import run_sweep
+    write_synthetic_ncmapss(tmp_path / "Data" / "N-CMAPSS", dataset="DS02",
+                            n_dev_units=3, n_test_units=2, min_cycles=20,
+                            max_cycles=30, seed=7)
+    base = _ncmapss_cfg(tmp_path / "Data", tmp_path,
+                        test_truncation_mode="random", test_truncation_range=(0.4, 0.9))
+    with pytest.raises(ValueError, match="experiment_name"):  # guard fires before cache load
+        run_sweep(base, device="cpu", baseline_names=["predict_mean"])
+    exp = base.replace(experiment_name="protocol_v2")
+    build_embedding_cache(exp, embedder=MockEmbedder(feature_dim=12))
+    csv = run_sweep(exp, device="cpu", baseline_names=["predict_mean", "gbm"])
+    assert Path(csv).name.startswith("protocol_v2_") and Path(csv).exists()
+
+
 def test_plot_data_scaling_facets_by_dataset(tmp_path):
     """A results CSV holding two datasets must yield per-dataset figures, never
     one pooled curve (the pre-§24 silent-mixing bug)."""

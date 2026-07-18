@@ -52,6 +52,14 @@ HEAD_FEATURE_CHOICES = ("emb", "emb+locscale", "emb+locscale+raw")
 # output/forecast patch, index -2 is the REG token; content patches are [:-2].
 POOLING_CHOICES = ("forecast_token", "last_content", "mean", "flatten")
 
+# Test-truncation protocol for the run-to-failure datasets (XJTU-SY, N-CMAPSS).
+# "fixed" truncates every test unit at the SAME life fraction (the recorded v1
+# protocol, §22/§27); "random" draws a per-unit fraction from
+# ``test_truncation_range`` (protocol v2, §32) so test-RUL variance is restored and
+# ``predict_mean`` stops being near-optimal by construction. Ignored for C-MAPSS
+# (which uses the provided RUL_FDxxx.txt and never truncates).
+TEST_TRUNCATION_MODES = ("fixed", "random")
+
 # The 14 non-constant FD001 sensors. Sensors 1,5,6,10,16,18,19 are flat (zero
 # variance) under FD001's single operating condition and are dropped by
 # convention. This is a fixed, dataset-level, a-priori list (a property of the
@@ -180,6 +188,21 @@ class Config:
     # §30); the loader then REQUIRES every named member and raises if one is missing.
     dsall_datasets: Optional[list] = None
 
+    # ---- test-truncation protocol (XJTU-SY / N-CMAPSS; ignored for C-MAPSS) -----
+    # "fixed" (default) truncates every test unit at the same life fraction
+    # (``xjtu_test_truncation`` / ``ncmapss_test_truncation`` above) -- the recorded v1
+    # protocol. "random" draws a per-unit fraction from ``test_truncation_range``,
+    # seeded deterministically by (member-dataset, unit_id, test_truncation_seed), so
+    # test-RUL variance is restored and the ``predict_mean`` floor stops being near-
+    # optimal by construction (protocol v2; CHANGES.md §32). DECISION (uncited): no
+    # community standard for these cycle-level datasets; random truncation mirrors the
+    # varied C-MAPSS RUL_FDxxx.txt targets. The three fields join the WINDOW cache key
+    # ONLY when mode == "random" AND the dataset truncates, so every fixed-mode key and
+    # every C-MAPSS key stays byte-identical (tested).
+    test_truncation_mode: str = "fixed"
+    test_truncation_range: tuple = (0.4, 0.9)
+    test_truncation_seed: int = 0  # DECISION (uncited): fixes the per-unit random draws
+
     # ---- RUL labels --------------------------------------------------------
     # Piecewise-linear RUL: clip at a constant beyond which degradation is not yet
     # observable. 125 is community convention (Heimes 2008; Li et al. 2018).
@@ -298,6 +321,15 @@ class Config:
             raise ValueError(
                 f"head_features must be one of {HEAD_FEATURE_CHOICES}, got {self.head_features!r}"
             )
+        if self.test_truncation_mode not in TEST_TRUNCATION_MODES:
+            raise ValueError(
+                f"test_truncation_mode must be one of {TEST_TRUNCATION_MODES}, "
+                f"got {self.test_truncation_mode!r}")
+        lo, hi = self.test_truncation_range
+        if not (0.0 < float(lo) < float(hi) < 1.0):
+            raise ValueError(
+                f"test_truncation_range must be (lo, hi) with 0 < lo < hi < 1, "
+                f"got {self.test_truncation_range!r}")
         # experiment_name lands in every result filename -- keep it path-safe.
         if self.experiment_name and not re.fullmatch(r"[A-Za-z0-9._-]+", self.experiment_name):
             raise ValueError(
@@ -385,6 +417,15 @@ class Config:
             if self.dataset == "DSALL":  # which files were unioned defines the dataset
                 d["dsall_datasets"] = (sorted(self.dsall_datasets)
                                        if self.dsall_datasets is not None else "auto")
+        # Randomized test truncation (protocol v2, §32) is a SEPARATE arm that changes
+        # the test data on the truncation datasets, so it must re-key their caches.
+        # Added ONLY when active (random) AND the dataset truncates -> every fixed-mode
+        # key, and every C-MAPSS key, is byte-identical to before (tested).
+        if (self.test_truncation_mode == "random"
+                and self.dataset_kind() in ("xjtu", "ncmapss")):
+            d["test_truncation_mode"] = self.test_truncation_mode
+            d["test_truncation_range"] = list(self.test_truncation_range)
+            d["test_truncation_seed"] = self.test_truncation_seed
         return d
 
     def _embedding_key_fields(self) -> dict:

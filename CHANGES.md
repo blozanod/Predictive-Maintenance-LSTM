@@ -590,6 +590,76 @@ The sub-dataset `DS08d` (`N-CMAPSS_DS08d-010.h5`) was found to be corrupted in t
 - **Exclusion policy.** Because this corruption exists in the NASA source file itself, all public mirrors (such as Kaggle) suffer from the same truncation. Standard practice in the research community is to exclude `DS08d` from runs.
 - **Code modifications.** Removed `"DS08d"` from `NCMAPSS_DATASETS` in `src/config.py` and from the active campaign overrides (`DEFAULT_DATASET_OVERRIDES["DSALL"]["dsall_datasets"]` in `src/campaign.py`) so the combined `DSALL` dataset and campaign sweeps run cleanly over the remaining nine valid datasets.
 
+## 32. Protocol v2 — pre-registration + randomized test-truncation (Task A)
+First section of the protocol-v2 arm (`PROTOCOL_V2_PLAN.md`). Landed **before any v2 GPU
+run** so the framing below is timestamped ahead of the results it interprets.
+
+### 32.1 Pre-registration (record before running)
+Protocol v2 changes the evaluation protocol on the two dataset families where the frozen
+TSFM currently looks worst (N-CMAPSS, XJTU-SY). That is legitimate **only** under this
+pre-registered framing:
+
+The cycle-aggregation protocol for N-CMAPSS (§27) and the indicator-trend protocol for
+XJTU (§22) are deliberate information bottlenecks adopted to reuse one cycle-level
+pipeline. The fixed 0.6-of-life truncation additionally **degenerates the last-cycle eval**:
+on a small homogeneous fleet it compresses every test unit's true RUL into a narrow band
+centered near the training mean, so `predict_mean` is near-optimal *by construction* over
+only 3–6 predictions per cell. Protocol v2 adds (a) a corrected, randomized truncation
+protocol (this section) and, in later sections, (b) a native-resolution sub-cycle arm on
+DS02, to test a **falsifiable hypothesis**: *the cycle-aggregation bottleneck, not the
+frozen TSFM, explains the contested N-CMAPSS result.* Both outcomes are reportable — H holds
+→ the TSFM boundary sharpens to "needs native-resolution signals"; H fails → a genuine
+negative result on realistic fleets. **Commitments:** both protocol arms (fixed/aggregated
+*and* random/native) are reported in the paper regardless of outcome; neither replaces the
+other; no fixed-mode or cap-125 result row is ever deleted. Sub-cycle/native numbers may be
+described as "consistent with the published DS02 range" (protocol-family comparability) but
+are **never tabled against published results** (channel sets, windows, downsampling differ) —
+the §27 non-comparability warning stands. The all-cycles **horizon** eval is the primary
+metric for N-CMAPSS/XJTU/DSALL; the (now randomized) last-cycle numbers are secondary.
+
+### 32.2 Randomized test-truncation (implementation)
+New `Config` fields (all default to the **recorded v1 protocol**, so every existing run,
+cache key, and CSV is byte-identical — asserted against `main` and in tests):
+- `test_truncation_mode: str = "fixed"` (`{"fixed","random"}`). `"fixed"` truncates every
+  test unit at the same life fraction (`xjtu_test_truncation`/`ncmapss_test_truncation`);
+  `"random"` draws a per-unit fraction.
+- `test_truncation_range: tuple = (0.4, 0.9)` and `test_truncation_seed: int = 0` (used only
+  in random mode). Validated in `__post_init__` (mode ∈ choices; `0 < lo < hi < 1`).
+
+Mechanism (`datasets/base.resolve_truncation_fraction`): random mode draws the fraction from
+a generator seeded by `SHA256(member_dataset | unit_id | test_truncation_seed)` — deterministic,
+reproducible, varied across units, and **independent of the per-cell training seed** (the test
+set is one fixed benchmark per config). The seed is keyed on the **member file** (e.g. `DS02`),
+not `config.dataset`, so DSALL's per-file reuse of the same raw unit ids never makes two
+different engines share a fraction. Both loaders (`datasets/ncmapss.py`, `datasets/xjtu.py`)
+call the shared helper; N-CMAPSS threads the member name through `_truncate_test` (per-file and
+DSALL paths).
+
+Cache keys: `test_truncation_mode`/`range`/`seed` join `_window_key_fields()` **only when
+mode == "random" AND `dataset_kind() in {xjtu, ncmapss}`** — so fixed-mode keys and all
+C-MAPSS keys are unchanged, while a random run (and each distinct seed/range) re-embeds into
+its own cache. `dataset_kind()=="ncmapss"` covers DSALL.
+
+Row coexistence (DECISION, uncited): the `results_v2` restart key
+(`model,dataset,n_units,seed,loss`) carries no truncation-mode axis, so appending random-mode
+rows into a file that already holds fixed-mode rows would let the fixed rows mask the random
+ones. Rather than add a column / new key axis (which would move recorded CSV schemas),
+`evaluate.guard_random_truncation_namespacing` **requires a non-empty `experiment_name`** for
+random-mode runs on the truncation datasets, routing their outputs to a separate
+`<experiment_name>_*.csv`. Called from `run_sweep`, `run_fairness_baselines`,
+`run_baseline_window_comparison`, and `run_horizon_eval`; no-op for fixed mode and C-MAPSS.
+The full resolved config (incl. mode/range/seed) is captured in each run's
+`run_metadata.json` for provenance.
+
+Tests (`tests/test_datasets.py`): default/validation; random re-keys only the truncation
+datasets (seed and range each matter) while FD001 keys are byte-identical; the fraction
+helper (fixed passthrough, random determinism/in-range/per-unit and per-member variation,
+DSALL-safety); N-CMAPSS fixed≈0.6 vs random-spread realized fractions with reload determinism
+and seed sensitivity; XJTU random varies and is deterministic; the namespacing guard;
+end-to-end random sweep refused without `experiment_name` and namespaced with one. All CPU,
+no downloads. Incidental: corrected a stale pre-§31 assertion in `test_campaign.py`
+(`dsall_datasets` is 9 members, not 10, since DS08d was excluded in §31).
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,
