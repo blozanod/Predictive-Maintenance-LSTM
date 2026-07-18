@@ -85,7 +85,7 @@ XJTU_DATASETS = ("XJTU-SY",)
 # level like C-MAPSS (CHANGES.md §27). DSALL is the combined all-files fleet -- the
 # RQ1 high-data arm (§28). Per-file names carry the DS0x id; "DS08a/c/d" are separate.
 NCMAPSS_DATASETS = ("DS01", "DS02", "DS03", "DS04", "DS05", "DS06", "DS07",
-                    "DS08a", "DS08c", "DS08d", "DSALL")
+                    "DS08a", "DS08c", "DSALL")
 
 # N-CMAPSS channel schema. W = flight-condition scenario descriptors (4), X_s =
 # measured sensors (14); virtual sensors X_v, health params T, and per-row RUL Y are

@@ -52,7 +52,7 @@ DEFAULT_DATASET_OVERRIDES = {
     # downloaded (§28). Absent members raise, so this is safe to leave set -- a partial
     # download surfaces loudly rather than silently unioning a different fleet.
     "DSALL": {"dsall_datasets": ["DS01", "DS02", "DS03", "DS04", "DS05", "DS06",
-                                 "DS07", "DS08a", "DS08c", "DS08d"]},
+                                 "DS07", "DS08a", "DS08c"]},
 }
 
 

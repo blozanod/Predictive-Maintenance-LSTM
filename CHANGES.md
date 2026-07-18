@@ -579,10 +579,16 @@ updated (they now legitimately gain the 8-unit full-fleet cell).
   layout (`Data/CMAPSSData`, `Data/XJTU-SY`, `Data/N-CMAPSS` flat `.h5`), the accepted
   XJTU folder-name/nesting variants (§26), and the first-run N-CMAPSS aggregate-cache
   parse (§27). The campaign markdown lists the full dataset set (FD001–FD004 + XJTU-SY +
-  DS01…DS08d + DSALL) and explains the override semantics; the campaign cell now calls
+  DS01…DS08c + DSALL) and explains the override semantics; the campaign cell now calls
   `run_campaign(config, device=…)` with the recorded defaults (the old hand-written XJTU
   override that conflicted with the pinned protocol is removed). Only cells 2–3 changed;
   the deep-dive sections are untouched.
+
+## 31. Exclusion of corrupted N-CMAPSS DS08d dataset
+The sub-dataset `DS08d` (`N-CMAPSS_DS08d-010.h5`) was found to be corrupted in the official NASA Prognostics Center of Excellence (PCoE) source repository (`17.+Turbofan+Engine+Degradation+Simulation+Data+Set+2.zip`). The file has a physical size of 2,885,034,848 bytes, which is exactly 32 bytes short of the expected 2,885,034,880 bytes recorded in its HDF5 superblock.
+- **Workarounds fail.** Attempting to open the file raises `OSError: Unable to synchronously open file`. Artificially padding the file with 32 trailing zero-bytes resolves the size mismatch but raises `RuntimeError: Unable to get group info (bad symbol table node signature)` because the missing bytes contain critical root-group symbol table metadata.
+- **Exclusion policy.** Because this corruption exists in the NASA source file itself, all public mirrors (such as Kaggle) suffer from the same truncation. Standard practice in the research community is to exclude `DS08d` from runs.
+- **Code modifications.** Removed `"DS08d"` from `NCMAPSS_DATASETS` in `src/config.py` and from the active campaign overrides (`DEFAULT_DATASET_OVERRIDES["DSALL"]["dsall_datasets"]` in `src/campaign.py`) so the combined `DSALL` dataset and campaign sweeps run cleanly over the remaining nine valid datasets.
 
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
@@ -591,3 +597,4 @@ comparisons, or conclusions are written anywhere (Task 2.5) — recorded winners
 come only from completed runs.
 
 *(N-CMAPSS moved OUT of this list — implemented in §27; see DATASET_EXPANSION_PLAN.md.)*
+
