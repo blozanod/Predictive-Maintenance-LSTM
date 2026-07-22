@@ -83,6 +83,54 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
+# Earliness -- "too early is also bad" (RESEARCH_PLAN §8; CHANGES.md §37)
+#
+# Sign convention is the horizon `bias` convention (CHANGES.md §16) and nasa_score's:
+# d = pred - true. d >= 0 is the penalized "dangerously LATE" side (the model claims
+# MORE remaining life than there is -> a failure is missed); d < 0 is "wastefully
+# EARLY" (predicts less life than remains -> premature maintenance wastes useful life).
+# NASA score already punishes lateness as the scalar; this layer makes the two-sided
+# distribution explicit and sweeps the cost trade-off instead of fixing one ratio.
+# ---------------------------------------------------------------------------
+def earliness_histogram(y_true, y_pred, bin_edges) -> dict:
+    """Distribution of the signed error ``d = pred - true`` across ``bin_edges``
+    (internal breakpoints; ``-inf`` / ``+inf`` are prepended/appended). Returns the
+    per-bin fractions plus the headline split: ``frac_late`` (d >= 0, dangerous) vs
+    ``frac_early`` (d < 0, wasteful). Include 0.0 in ``bin_edges`` so no bin straddles
+    the late/early boundary. Raises on an empty input (no distribution to report)."""
+    y_true = np.asarray(y_true, np.float64)
+    y_pred = np.asarray(y_pred, np.float64)
+    n = int(len(y_true))
+    if n == 0:
+        raise ValueError("earliness_histogram needs at least one prediction")
+    d = y_pred - y_true
+    edges = [-np.inf, *sorted(float(e) for e in bin_edges), np.inf]
+    bins = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        mask = (d >= lo) & (d < hi)
+        n_bin = int(mask.sum())
+        bins.append({"lo": lo, "hi": hi, "n_bin": n_bin, "frac": n_bin / n,
+                     "side": "late" if lo >= 0 else "early"})
+    return {"n": n, "mean_signed_error": float(d.mean()),
+            "frac_late": float(np.mean(d >= 0)), "frac_early": float(np.mean(d < 0)),
+            "bins": bins}
+
+
+def cost_curve(y_true, y_pred, cost_ratios) -> dict:
+    """Maintenance cost swept over ``cost_ratios`` = late_cost / early_cost (early_cost
+    fixed at 1): ``cost(ratio) = Σ max(0, true-pred) + ratio · Σ max(0, pred-true)`` --
+    the wasteful under-prediction total plus ``ratio`` times the dangerous
+    over-prediction total. No single arbitrary ratio; the whole curve is the result
+    (RESEARCH_PLAN §8). Returns ``{ratio: cost}``."""
+    y_true = np.asarray(y_true, np.float64)
+    y_pred = np.asarray(y_pred, np.float64)
+    d = y_pred - y_true
+    late = float(np.clip(d, 0.0, None).sum())    # over-prediction of RUL (dangerous)
+    early = float(np.clip(-d, 0.0, None).sum())  # under-prediction of RUL (wasteful)
+    return {float(r): early + float(r) * late for r in cost_ratios}
+
+
+# ---------------------------------------------------------------------------
 # Provenance
 # ---------------------------------------------------------------------------
 def package_versions() -> dict:
@@ -168,6 +216,22 @@ def ensure_csv_schema(csv_path: str | Path, fieldnames: list[str]) -> None:
         )
 
 
+def paired_ttest(a_values, b_values) -> tuple[float, float]:
+    """Paired t statistic + two-sided p-value of ``a - b`` over the shared seeds
+    (scipy ``ttest_rel``). Returns ``(nan, nan)`` when fewer than 2 pairs or the
+    difference has no variance (ties / constant offset) -- so callers never see
+    scipy's +/-inf. The single reusable paired-seed test core (generalized from the
+    horizon CORN-vs-MSE comparison to arbitrary model pairs; CHANGES.md §36)."""
+    from scipy import stats as _stats
+    a = np.asarray(a_values, np.float64)
+    b = np.asarray(b_values, np.float64)
+    d = a - b
+    if len(d) >= 2 and not np.allclose(d, d[0]):
+        t, p = _stats.ttest_rel(a, b)
+        return float(t), float(p)
+    return float("nan"), float("nan")
+
+
 def paired_seed_ttest(
     horizon_csv: str | Path,
     model: str = "chronos-2_mlp",
@@ -185,8 +249,6 @@ def paired_seed_ttest(
     two-sided p-value (scipy ``ttest_rel``; nan when < 2 paired seeds). With 5
     seeds this is a low-powered test -- treat p-values as descriptive and read
     them alongside the per-bin means, not instead of them."""
-    from scipy import stats as _stats
-
     cells: dict[tuple, dict[str, dict[int, float]]] = {}
     with open(horizon_csv, newline="") as f:
         for r in csv.DictReader(f):
@@ -200,13 +262,7 @@ def paired_seed_ttest(
         seeds = sorted(set(arms[loss_a]) & set(arms[loss_b]))
         a = np.array([arms[loss_a][s] for s in seeds], np.float64)
         b = np.array([arms[loss_b][s] for s in seeds], np.float64)
-        d = a - b
-        # zero-variance differences (ties, or a constant offset) have no defined
-        # t statistic -- report nan rather than scipy's +/-inf.
-        if len(seeds) >= 2 and not np.allclose(d, d[0]):
-            t, p = _stats.ttest_rel(a, b)
-        else:
-            t, p = float("nan"), float("nan")
+        t, p = paired_ttest(a, b)  # shared paired-seed core (nan-safe)
         out.append({
             "max_rul": max_rul, "n_units": n_units, "bin_lo": bin_lo, "bin_hi": bin_hi,
             "metric": metric, "n_seeds": len(seeds),

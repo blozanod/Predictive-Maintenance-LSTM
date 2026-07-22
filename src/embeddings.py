@@ -54,51 +54,98 @@ class Embedder(Protocol):
 
 # ---------------------------------------------------------------------------
 # Pooling (numpy reference; kept for tests + CPU paths)
+#
+# Pooling is TWO stages so it is common across every backbone (IMPLEMENTATION_PLAN
+# §4.1, the semantic-not-index-based pooling contract):
+#   1. pool the PATCH axis of one window ``(n_variates, patches, d_model)`` down to a
+#      per-variate vector ``(n_variates, K)``, honoring the four pooling NAMES, and
+#   2. collapse the variate axis by ``channel_aggregation`` -> the 1-D head feature.
+#
+# ``n_special_tokens`` is the layout knob that makes the same four names mean the
+# same thing across layouts: Chronos-2 appends 2 trailing special tokens (REG at -2,
+# forecast at -1), so ``n_special_tokens=2`` and content patches are ``[:-2]``; the
+# plain-patch backbones (MOMENT/TimesFM/Moirai/TTM as wrapped here) append none, so
+# ``n_special_tokens=0`` and every position is a content patch. The four names map:
+#   * forecast_token -> the last position (the forecast special token for Chronos-2;
+#     the last patch -- the closest "predict-next" summary -- when there are none).
+#   * last_content   -> the last CONTENT patch (== forecast_token when n_special=0).
+#   * mean           -> mean over content patches.
+#   * flatten        -> all content patches concatenated (fixed-context only).
+# The defaults (``channel_aggregation="concat"``, ``n_special_tokens=2``) reproduce
+# the original Chronos-2 pooling byte-for-byte, so the recorded FD001 cache is
+# unchanged.
 # ---------------------------------------------------------------------------
-def pool_window_embedding(emb: np.ndarray, strategy: str) -> np.ndarray:
-    """Reduce one window embedding ``(n_variates, num_patches+2, d_model)`` to a 1D
-    feature vector. The variate axis is always flattened into the output (Chronos-2
-    mixes variates via group attention, so per-variate embeddings carry signal).
+def _content_count(n_patches: int, n_special_tokens: int) -> int:
+    """Number of content patches, failing loud when there are none."""
+    n_content = n_patches - n_special_tokens
+    if n_content < 1:
+        raise ValueError(
+            f"need >=1 content patch after excluding {n_special_tokens} special "
+            f"token(s), got {n_patches} patch position(s)")
+    return n_content
 
-    Special tokens (REG at -2, forecast at -1) are EXCLUDED from content-based
-    poolings (``mean``, ``flatten``); ``forecast_token``/``last_content`` index them
-    explicitly (Task 1.3)."""
+
+def pool_patches(emb: np.ndarray, strategy: str, n_special_tokens: int = 2) -> np.ndarray:
+    """Pool the patch axis of one window ``(n_variates, patches, d_model)`` down to a
+    per-variate ``(n_variates, K)`` array (K = d_model, or content_patches*d_model
+    for ``flatten``). Stage 1 of the pooling contract (see module header)."""
     if emb.ndim != 3:
         raise ValueError(f"expected (n_variates, patches, d_model), got {emb.shape}")
-    if emb.shape[1] < 3:
-        raise ValueError(
-            f"need >=3 patch positions (>=1 content + REG + forecast), got {emb.shape[1]}"
-        )
+    n_content = _content_count(emb.shape[1], n_special_tokens)
     if strategy == "forecast_token":
-        pooled = emb[:, -1, :]            # masked output/forecast patch (CLS-like)
+        return emb[:, -1, :]                       # last position (special or last patch)
+    if strategy == "last_content":
+        return emb[:, n_content - 1, :]            # last real content patch
+    content = emb[:, :n_content, :]
+    if strategy == "mean":
+        return content.mean(axis=1)               # content patches only
+    if strategy == "flatten":
+        return content.reshape(emb.shape[0], -1)  # (n_variates, content*d_model)
+    raise ValueError(f"unknown pooling strategy: {strategy!r}")
+
+
+def aggregate_variates(per_variate: np.ndarray, channel_aggregation: str) -> np.ndarray:
+    """Collapse the variate axis of ``(n_variates, K)`` into a 1-D feature (stage 2):
+    ``concat`` flattens it (F = n_variates*K, the practitioner default), ``mean``
+    averages the variates (F = K, the RQ-M common-representation control)."""
+    if channel_aggregation == "concat":
+        return per_variate.reshape(-1)
+    if channel_aggregation == "mean":
+        return per_variate.mean(axis=0)
+    raise ValueError(f"unknown channel_aggregation: {channel_aggregation!r}")
+
+
+def pool_window_embedding(emb: np.ndarray, strategy: str,
+                          channel_aggregation: str = "concat",
+                          n_special_tokens: int = 2) -> np.ndarray:
+    """Reduce one window embedding ``(n_variates, patches, d_model)`` to a 1D feature
+    vector: pool the patch axis (``strategy``) then collapse the variate axis
+    (``channel_aggregation``). See the module header for the layout contract."""
+    per_variate = pool_patches(emb, strategy, n_special_tokens)
+    return aggregate_variates(per_variate, channel_aggregation).astype(np.float32)
+
+
+def _pool_one_torch(emb_t, strategy: str, channel_aggregation: str = "concat",
+                    n_special_tokens: int = 2):
+    """On-device twin of ``pool_window_embedding`` for one window tensor
+    ``(n_variates, P, d_model)`` -> 1D tensor, so only the small pooled vector is
+    transferred to host (Task 2 vectorized pooling)."""
+    n_content = _content_count(emb_t.shape[1], n_special_tokens)
+    if strategy == "forecast_token":
+        per_variate = emb_t[:, -1, :]
     elif strategy == "last_content":
-        pooled = emb[:, -3, :]            # last real content patch (before REG, forecast)
+        per_variate = emb_t[:, n_content - 1, :]
     elif strategy == "mean":
-        pooled = emb[:, :-2, :].mean(axis=1)   # content patches only
+        per_variate = emb_t[:, :n_content, :].mean(dim=1)
     elif strategy == "flatten":
-        return emb[:, :-2, :].reshape(-1).astype(np.float32)  # content patches, all
+        per_variate = emb_t[:, :n_content, :].reshape(emb_t.shape[0], -1)
     else:
         raise ValueError(f"unknown pooling strategy: {strategy!r}")
-    return pooled.reshape(-1).astype(np.float32)
-
-
-def _pool_one_torch(emb_t, strategy: str):
-    """On-device pooling of one window tensor ``(n_variates, P, d_model)`` -> 1D
-    tensor. Same semantics as ``pool_window_embedding`` but stays on the GPU so only
-    the small pooled vector is transferred to host (Task 2 vectorized pooling)."""
-    if emb_t.shape[1] < 3:
-        raise ValueError(
-            f"need >=3 patch positions (>=1 content + REG + forecast), got {emb_t.shape[1]}"
-        )
-    if strategy == "forecast_token":
-        return emb_t[:, -1, :].reshape(-1)
-    if strategy == "last_content":
-        return emb_t[:, -3, :].reshape(-1)
-    if strategy == "mean":
-        return emb_t[:, :-2, :].mean(dim=1).reshape(-1)
-    if strategy == "flatten":
-        return emb_t[:, :-2, :].reshape(-1)
-    raise ValueError(f"unknown pooling strategy: {strategy!r}")
+    if channel_aggregation == "concat":
+        return per_variate.reshape(-1)
+    if channel_aggregation == "mean":
+        return per_variate.mean(dim=0)
+    raise ValueError(f"unknown channel_aggregation: {channel_aggregation!r}")
 
 
 # ---------------------------------------------------------------------------

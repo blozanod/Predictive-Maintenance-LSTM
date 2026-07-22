@@ -33,13 +33,20 @@ src/
                  by-unit seeded subsampling, fixed windowing (label at window end),
                  last-cycle test windows, VARIABLE-LENGTH TSFM contexts (aligned 1:1
                  to the fixed windows), baseline channel scaler. Re-exports the loaders.
-  models/        Frozen-TSFM embedders, one module per model, behind a registry:
-    chronos.py   ChronosEmbedder (amazon/chronos-2). __init__.make_embedder picks the
-                 class for config.model_name — the slot-in point for MOMENT/TimesFM/TTM.
-  embeddings.py  Model-agnostic embedding infra: pooling (forecast_token/last_content/
-                 mean/flatten, special tokens excluded from content poolings), on-GPU
-                 batch pooling, per-window loc/scale capture, fp16-cached idempotent
-                 disk cache. Injectable embedder (tests pass a mock).
+  models/        Frozen-TSFM embedders, one module per model, behind a registry.
+    chronos.py   Five backbones (CHANGES.md §34): chronos.py (amazon/chronos-2,
+    moirai.py    multivariate-native), moirai.py (Salesforce/moirai-2), moment.py
+    moment.py    (AutonLab/MOMENT-1-large, univariate), timesfm.py (google/timesfm-2.5),
+    timesfm.py   ttm.py (ibm-granite tiny channel-mixing). base.py holds the shared
+    ttm.py       plain-patch TSFMEmbedderBase; the four new backbones only differ in
+    ttm.py       their lazy backbone load/call. __init__.make_embedder picks the class
+    base.py      for config.model_name.
+  embeddings.py  Model-agnostic embedding infra: two-stage pooling (pool_patches over
+                 the patch axis honoring forecast_token/last_content/mean/flatten with
+                 an n_special_tokens layout knob, then aggregate_variates by
+                 config.channel_aggregation — concat/mean, the RQ-M fairness knob),
+                 on-GPU batch pooling, per-window loc/scale capture, fp16-cached
+                 idempotent disk cache. Injectable embedder (tests pass a mock).
   features.py    Head-feature assembly (emb / emb+locscale / emb+locscale+raw) with a
                  leakage-safe standardizer fit on the fraction's train split only.
   heads.py       2-layer MLP head; MSE / CORN (coral-pytorch) / quantile losses;
@@ -54,9 +61,17 @@ src/
                  the winner), run_sweep (data-fraction × loss × seed at the winner),
                  run_baseline_window_comparison. Per-cell checkpointing +
                  completed-cell skipping. Never re-embeds.
-  horizon.py     Horizon-stratified evaluation; transfer.py cold-start transfer;
-  transfer.py    plots.py Stage C figures. All result files are prefixed with
-  plots.py       config.experiment_name (config.results_path / figures_dir helpers).
+  horizon.py     Horizon-stratified evaluation + run_earliness (earliness histograms +
+  transfer.py    cost curves, §37); transfer.py cold-start transfer.
+  scoring.py     The win-rule (§36): strongest-baseline-per-cell, win/tie/loss/hollow
+                 verdicts, and the success_map object plots.py renders.
+  probes.py      Factor-probe harness (§38): run_factor_probe (channels/noise/… factor
+                 sweeps with the reduced roster) + probe_roster.
+  zeroshot.py    Zero-shot health-index forecasting (RQ-Z, §39): no head, threshold
+                 crossing → RUL, forecaster_factory seam.
+  plots.py       Stage C figures + the v2 success-map / earliness / cost-curve /
+                 cross-TSFM figures. All result files are prefixed with
+                 config.experiment_name (config.results_path / figures_dir helpers).
 tests/           CPU-only smoke tests (no GPU, no C-MAPSS download).
 notebooks/       One notebook per dataset family, each self-cloning the repo from GitHub
   cmapss.ipynb   and pointing at Drive for data/cache/results only — so they run in
