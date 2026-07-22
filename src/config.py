@@ -52,6 +52,26 @@ HEAD_FEATURE_CHOICES = ("emb", "emb+locscale", "emb+locscale+raw")
 # output/forecast patch, index -2 is the REG token; content patches are [:-2].
 POOLING_CHOICES = ("forecast_token", "last_content", "mean", "flatten")
 
+# How the pooled PER-VARIATE embeddings collapse into the head feature vector
+# (RQ-M fairness knob, IMPLEMENTATION_PLAN §4.1). "concat" preserves per-channel
+# detail (F = n_variates * d_model) -- how a practitioner uses each model and the
+# byte-identical historical Chronos-2 behavior; "mean" collapses the variate axis
+# (F = d_model) for the cross-TSFM common-representation fairness control. Applied
+# uniformly to ALL five models so the control is genuinely common.
+CHANNEL_AGGREGATION_CHOICES = ("concat", "mean")
+
+# Perturbative noise-injection kinds (sim-only, RQ-H; IMPLEMENTATION_PLAN §4.4).
+# gaussian = additive white noise at a target SNR; drift = slow per-channel bias
+# ramp; dropout = random per-row channel blanking. Applied only to SIMULATED
+# datasets (C-MAPSS/N-CMAPSS) -- real readings are never perturbed (guarded loud).
+NOISE_INJECTION_KINDS = ("gaussian", "drift", "dropout")
+
+# Dataset families whose sensor readings are SIMULATED and may therefore be
+# perturbed by noise_injection (RESEARCH_PLAN §1: controlled noise makes an
+# unrealistically-clean simulated signal MORE lifelike). Every other family is a
+# REAL measurement and perturbation is out of scope by design (fail loud).
+SIMULATED_DATASET_KINDS = ("cmapss", "ncmapss")
+
 # The 14 non-constant FD001 sensors. Sensors 1,5,6,10,16,18,19 are flat (zero
 # variance) under FD001's single operating condition and are dropped by
 # convention. This is a fixed, dataset-level, a-priori list (a property of the
@@ -235,6 +255,12 @@ class Config:
     # Head-feature composition (HEAD_FEATURE_CHOICES). Selects, at Stage B, which
     # cached signals feed the head; does NOT change the embedding cache (Task 1.1).
     head_features: str = "emb"
+    # Cross-model fairness knob (RQ-M, CHANGES.md §34). How the pooled per-variate
+    # embeddings collapse into the head feature vector (CHANNEL_AGGREGATION_CHOICES):
+    # "concat" (default; F = n_variates*d_model, the byte-identical historical path)
+    # or "mean" (F = d_model, the common-representation control). Part of the
+    # embedding key ONLY when != "concat", so every existing FD001 key is unchanged.
+    channel_aggregation: str = "concat"
 
     # ---- MLP regression head ----------------------------------------------
     # 2-layer MLP, hidden 256, dropout -- mirrors arXiv:2606.11990 (their ablation:
@@ -279,6 +305,40 @@ class Config:
     # the cached fixed windows are unaffected.
     baseline_windows: dict = field(default_factory=dict)
 
+    # ---- scoring & the win-rule (RESEARCH_PLAN §8; CHANGES.md §36) ----------
+    # These score EXISTING result CSVs (src/scoring.py); none is a cache key.
+    # DECISION (uncited): min seed-mean improvement (in the primary-metric's units)
+    # a TSFM must beat the strongest per-cell baseline by to be called a "win".
+    win_margin: float = 0.0
+    # Paired-seed significance threshold for the win test. Descriptive only: at 5
+    # seeds the paired test is low-powered, so read p alongside the seed-means.
+    win_alpha: float = 0.05
+    # The metric the absolute-floor guard reads: a "win" where even the winner's
+    # error is worse than the predict-mean floor is HOLLOW and not a success
+    # condition (RESEARCH_PLAN §8). One of evaluate.METRIC_FIELDS.
+    usability_floor_metric: str = "nasa_clipped"
+
+    # ---- earliness: "too early is also bad" (RESEARCH_PLAN §8; CHANGES.md §37) --
+    # Neither is a cache key -- both drive the earliness histogram / cost curve over
+    # existing predictions (src/evaluate.py). Edges bin d = pred - true (the horizon
+    # `bias` sign convention, CHANGES.md §16): d >= 0 is the penalized "late" side
+    # (predicted more life than remains), d < 0 is "wastefully early".
+    earliness_bin_edges: list = field(default_factory=lambda: [
+        -50.0, -25.0, -10.0, 0.0, 10.0, 25.0, 50.0])
+    # early-cost : late-cost sweep for the cost curve (values = late_cost / early_cost,
+    # early_cost fixed at 1). No single arbitrary ratio -- the curve is the result.
+    cost_ratios: list = field(default_factory=lambda: [1.0, 2.0, 5.0, 10.0, 20.0,
+                                                       50.0, 100.0])
+
+    # ---- interventions: sim-only noise/drift injection (RQ-H; CHANGES.md §38) ---
+    # Controlled degradation of SIMULATED sensor readings to map the noise-tolerance
+    # frontier (RESEARCH_PLAN §1). {} = off. Applied in data.load_prepared AFTER
+    # labels, BEFORE windowing. RAISES if config.dataset is a REAL dataset
+    # (XJTU/MetroPT/Hydraulic/Backblaze) -- perturbing real readings is out of scope.
+    # DECISION (uncited): kinds/params, e.g. {"kind":"gaussian","snr_db":20,"seed":0}.
+    # Added to the window key ONLY when non-empty (existing keys unchanged).
+    noise_injection: dict = field(default_factory=dict)
+
     # ---- paths -------------------------------------------------------------
     cache_dir: str = "cache"      # embedding + window caches (Stage A output)
     results_dir: str = "results"  # metrics CSVs, run metadata, sampled unit IDs
@@ -298,6 +358,19 @@ class Config:
             raise ValueError(
                 f"head_features must be one of {HEAD_FEATURE_CHOICES}, got {self.head_features!r}"
             )
+        if self.channel_aggregation not in CHANNEL_AGGREGATION_CHOICES:
+            raise ValueError(
+                f"channel_aggregation must be one of {CHANNEL_AGGREGATION_CHOICES}, "
+                f"got {self.channel_aggregation!r}")
+        # Typo-guard the noise kind at construction; the sim-only (real-dataset)
+        # guard fires where the perturbation is APPLIED (data.load_prepared), so a
+        # real-dataset config can still be built to assert the key/guard behavior.
+        if self.noise_injection:
+            kind = self.noise_injection.get("kind")
+            if kind not in NOISE_INJECTION_KINDS:
+                raise ValueError(
+                    f"noise_injection['kind'] must be one of {NOISE_INJECTION_KINDS}, "
+                    f"got {kind!r}")
         # experiment_name lands in every result filename -- keep it path-safe.
         if self.experiment_name and not re.fullmatch(r"[A-Za-z0-9._-]+", self.experiment_name):
             raise ValueError(
@@ -341,6 +414,11 @@ class Config:
             f"unknown dataset {self.dataset!r}; expected FD001-FD004, "
             f"one of {XJTU_DATASETS}, or one of {NCMAPSS_DATASETS}")
 
+    def is_simulated_dataset(self) -> bool:
+        """True iff ``config.dataset`` is a SIMULATED family (C-MAPSS/N-CMAPSS) and
+        may therefore be perturbed by ``noise_injection`` (RQ-H, sim-only)."""
+        return self.dataset_kind() in SIMULATED_DATASET_KINDS
+
     def effective_condition_norm(self) -> bool:
         """Resolved condition-normalization flag: explicit value, else auto by
         dataset (ON for FD002/FD004 and XJTU-SY, OFF for FD001/FD003)."""
@@ -377,6 +455,11 @@ class Config:
             # Changes every cached window/embedding when toggled (CHANGES.md §21).
             "condition_norm": self.effective_condition_norm(),
         }
+        # Sim-only perturbation (RQ-H, §38) mutates the readings BEFORE windowing, so
+        # it changes the cached windows/embeddings -- but only when set. Added
+        # CONDITIONALLY so every existing (unperturbed) FD001 key stays byte-identical.
+        if self.noise_injection:
+            d["noise_injection"] = dict(self.noise_injection)
         if self.dataset_kind() == "xjtu":  # split protocol changes the data itself
             d["xjtu_test_bearings"] = sorted(self.xjtu_test_bearings)
             d["xjtu_test_truncation"] = self.xjtu_test_truncation
@@ -402,6 +485,11 @@ class Config:
             "tsfm_context_length": self.effective_tsfm_context(),
             "cache_schema_version": CACHE_SCHEMA_VERSION,
         })
+        # Cross-model fairness knob (RQ-M, §34): "mean" collapses the variate axis, so
+        # it changes the pooled embeddings. Added CONDITIONALLY (only when != "concat")
+        # so every existing FD001 embedding key is byte-identical (stable-key test).
+        if self.channel_aggregation != "concat":
+            d["channel_aggregation"] = self.channel_aggregation
         return d
 
     @staticmethod

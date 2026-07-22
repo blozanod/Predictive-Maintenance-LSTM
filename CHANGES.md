@@ -648,11 +648,120 @@ family (derived from the registry via `datasets.<family>.DATASETS`, so it self-m
   `RUN_DEEP_DIVES` exactly as before. `README.md`'s "Run on Colab" section is rewritten for
   the three notebooks.
 
-## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
-TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
-`model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,
-comparisons, or conclusions are written anywhere (Task 2.5) — recorded winners (§12)
-come only from completed runs.
+## 34. Milestone 1 — four new TSFM embedders + `channel_aggregation` (RQ-M)
+The v2 roster grows from one backbone to five (IMPLEMENTATION_PLAN §4.1). Four new
+`src/models/` modules register under their `model_name`: `moirai.py`
+(`Salesforce/moirai-2`, multivariate-native), `moment.py` (`AutonLab/MOMENT-1-large`,
+univariate), `timesfm.py` (`google/timesfm-2.5`, univariate), `ttm.py`
+(`ibm-granite/granite-timeseries-ttm-r2`, tiny channel-mixing) — each in `EMBEDDERS`.
+- **Semantic (not index-based) pooling contract.** `embeddings.py`'s pooling is
+  refactored into two stages: `pool_patches` reduces one window's patch axis to a
+  per-variate vector honoring the four pooling NAMES, then `aggregate_variates`
+  collapses the variate axis. A new `n_special_tokens` knob makes the names mean the
+  same thing across layouts — Chronos-2 appends 2 trailing special tokens (REG,
+  forecast; `n_special_tokens=2`), the four new backbones append none
+  (`n_special_tokens=0`), so `forecast_token` maps to the forecast token for Chronos-2
+  and to the last patch (the closest "predict-next" summary) elsewhere. The four new
+  backbones share `models/base.py` (`TSFMEmbedderBase`): only their backbone
+  load/call (`_load_pipeline` / `_encode_batch`, the `# pragma: no cover` boundary)
+  differ; batching, pooling, the loc/scale fallback, and `describe` are shared and
+  CPU-tested via a fake `_encode_batch`.
+- **`channel_aggregation` (the RQ-M fairness knob).** New `Config` field
+  (`"concat"` default → `F = n_variates·d_model`; `"mean"` → `F = d_model`, the common
+  representation), applied UNIFORMLY to all five models (Chronos-2 threads it too).
+  Added to the embedding key ONLY when `!= "concat"`, so every recorded FD001 key is
+  byte-identical (the default `concat`/`n_special_tokens=2` pooling reproduces the old
+  Chronos-2 output byte-for-byte; stable-key test green).
+- **Per-channel loc/scale fallback.** Univariate/plain backbones that do not surface
+  their RevIN loc/scale fall back to the per-channel INPUT mean/std
+  (`TSFMEmbedderBase.loc_scale_from_contexts`), keeping the canonical `(N, n_variates,
+  2)` shape. Documented fallback if a backbone won't surface clean per-patch states:
+  its encoder/penultimate hidden states (RESEARCH_PLAN §11) — recorded per module as a
+  `# DECISION (uncited):`.
+- Tests (`tests/test_models.py`, no backbone import): the pooling-name→layout mapping
+  for both layout kinds, `concat` vs `mean` dims, the loc/scale shape, empty context,
+  `describe` keys, `make_embedder` selecting each, and a models registry-drift test
+  mirroring the datasets one.
 
-*(N-CMAPSS moved OUT of this list — implemented in §27; see DATASET_EXPANSION_PLAN.md.)*
+## 35. Cross-TSFM representation-fairness run (native vs common) — RQ-M
+`sweep.run_representation_fairness` runs every model TWICE at full data / MSE / ≥3
+seeds — **native** (`channel_aggregation="concat"`, own default pooling) and **common**
+(`channel_aggregation="mean"`, `pooling="mean"`) — writing `representation_fairness.csv`
+so the cross-TSFM ranking can be checked for aggregation artifacts. Each (model, mode)
+has its own Stage-A cache (keys differ by aggregation/pooling), built idempotently;
+`embedder_factory` injects a CPU mock; restartable on (model, aggregation, pooling,
+seed). `plots.plot_cross_tsfm` renders the native-vs-common grouped bars.
+
+## 36. Scoring & the win-rule (`src/scoring.py`) — the success map
+The formal realization of RESEARCH_PLAN §8. `strongest_baseline_per_cell` finds the
+toughest COMPETITOR bar per `(dataset, n_units[, factor, level])` cell; `win_verdict`
+returns win/tie/loss/hollow per (cell, TSFM); `success_map` reads the per-combo CSVs
+(glob / directory / file) into the headline table (verdict + margin + p + seed-means,
+RMSE alongside).
+- **Primary metric = `nasa_clipped`** (asymmetric); **win** iff the TSFM seed-mean
+  beats the strongest competitor by more than `config.win_margin` AND a paired-seed
+  t-test supports it at `config.win_alpha`; the significant reverse is a **loss**;
+  otherwise a **tie**. The paired-seed core is generalized out of
+  `evaluate.paired_seed_ttest` into `evaluate.paired_ttest` (nan-safe: <2 pairs or a
+  constant difference → nan, never scipy ±inf) and reused here.
+- **Absolute-floor (hollow) guard.** `predict_mean`/`cycle_reg` are treated as
+  *floors*, NOT competitors (RESEARCH_PLAN §6 lists them apart), which is what makes
+  the guard reachable: a TSFM that beats every real baseline but is no better than the
+  trivial predict-mean floor is downgraded from win to **hollow**
+  (`# DECISION (uncited):`). New non-cache-key `Config` fields: `win_margin`,
+  `win_alpha`, `usability_floor_metric`. `plots.plot_success_map` renders the
+  win/tie/loss/hollow heatmap (models × conditions, faceted per dataset).
+
+## 37. Earliness layer: histograms + cost curve ("too early is also bad")
+`evaluate.earliness_histogram` and `evaluate.cost_curve` (RESEARCH_PLAN §8), tied to the
+horizon `bias` / `nasa_score` sign convention (§16): `d = pred - true`, `d ≥ 0` is the
+penalized "dangerously LATE" side (claims more life than remains), `d < 0` is
+"wastefully EARLY". The histogram reports `frac_late` vs `frac_early` and the per-bin
+distribution; the cost curve sweeps `cost = Σ max(0, true-pred) + ratio·Σ max(0,
+pred-true)` over a range of late:early ratios — no single arbitrary ratio.
+`horizon.run_earliness` emits `earliness.csv` + `cost_curve.csv` from
+`horizon_predictions.csv` (restartable); new non-cache-key `Config` fields
+`earliness_bin_edges`, `cost_ratios`. `plots.plot_earliness` / `plots.plot_cost_curve`
+render them.
+
+## 38. Factor-probe harness (`src/probes.py`) + sim-only interventions
+`run_factor_probe` sweeps ONE playbook factor over levels on an anchor dataset with a
+reduced roster (top-2 TSFMs + top-2 foils + best NN), applying each level's
+intervention as a `Config` override, building the (idempotent) Stage-A cache at the
+intervened shape, running the head + reduced baselines, and appending
+`probe_<factor>.csv` rows keyed by `(dataset, model, factor, level, n_units, seed,
+loss)` — a success-map input. `probe_roster` resolves the reduced roster from a Tier-1
+glob. `embedder_factory` injects a CPU mock; restartable.
+- **Channel selection (RQ-C, subtractive):** each level is a `sensor_columns` subset
+  (already in the window key, no perturbation of kept values).
+- **Noise tolerance (RQ-H, perturbative, SIM ONLY):** new `noise_injection` `Config`
+  dict (`gaussian` at an SNR / `drift` ramp / `dropout` blanking; magnitudes in
+  per-channel std units, deterministic in a seed). Applied in `data.load_prepared`
+  AFTER labels/normalization, BEFORE windowing; added to the window key ONLY when
+  non-empty (existing keys unchanged). `data.apply_noise_injection` **RAISES on a REAL
+  dataset** (XJTU/MetroPT/Hydraulic/Backblaze) reporting the allowed simulated families
+  and the observed dataset — perturbing real readings is out of scope by design
+  (RESEARCH_PLAN §1). `# DECISION (uncited):` records the three kinds + their params.
+- Any other factor whose levels are already `Config`-override dicts slots in with no
+  harness change (the Phase-B aggregation / feature-mode knobs).
+
+## 39. Zero-shot health-index forecasting arm (`src/zeroshot.py`) — RQ-Z
+The 0-failures endpoint of RQ-B: no head, no training. `run_zeroshot` builds an
+unsupervised HEALTH INDEX (first PC of the z-standardized sensors, oriented to increase
+toward failure — no RUL labels used), calibrates a failure threshold from the fleet's
+run-to-failure endpoints, forecasts the index forward with a TSFM's native forecasting
+mode, and reads predicted RUL off the threshold crossing. Scored with both-protocol
+metrics against the `predict_mean` and `cycle_reg` floors → `zeroshot.csv`. The
+`forecaster_factory` seam mirrors `embedder_factory` (a mock returns a fixed
+trajectory; the default `ChronosForecaster`'s backbone load/call is the
+`# pragma: no cover` boundary). `# DECISION (uncited):` records the index construction
+and the threshold calibration.
+
+## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
+Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
+conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
+completed runs.
+
+*(N-CMAPSS moved OUT of this list — implemented in §27; see DATASET_EXPANSION_PLAN.md.
+TimesFM/MOMENT/TTM/Moirai moved OUT — implemented in §34.)*
 

@@ -40,12 +40,14 @@ from . import baselines as baselines_mod
 from .features import HeadFeatureBuilder, raw_last_cycle
 from .evaluate import (
     rmse, mae, nasa_score, append_result_row, completed_cells, save_run_metadata,
-    ensure_csv_schema, RESULTS_SCHEMA_VERSION,
+    ensure_csv_schema, earliness_histogram, cost_curve, RESULTS_SCHEMA_VERSION,
 )
 
 # max_rul is a cell key so the label-cap arms (e.g. 125 vs 200, CHANGES.md §18)
 # can share one horizon.csv without colliding on restart.
 HORIZON_KEYS = ["model", "dataset", "max_rul", "n_units", "seed", "loss"]
+# The earliness / cost-curve layer keys cells identically to the horizon eval.
+EARLINESS_KEYS = ["model", "dataset", "max_rul", "n_units", "seed", "loss"]
 DEFAULT_BIN_EDGES = (0.0, 25.0, 50.0, 75.0, 100.0, 125.0, float("inf"))
 
 
@@ -298,3 +300,65 @@ def run_horizon_eval(
                 _emit(bname, n_units, seed, "native", pred)
                 done.add(key)
     return out_csv
+
+
+# ---------------------------------------------------------------------------
+# Earliness histograms + cost curves (RESEARCH_PLAN §8; CHANGES.md §37)
+# ---------------------------------------------------------------------------
+def run_earliness(
+    config: Config,
+    preds_csv: Optional[str | Path] = None,
+    earliness_csv: Optional[str | Path] = None,
+    cost_csv: Optional[str | Path] = None,
+    bin_edges: Optional[Sequence[float]] = None,
+    cost_ratios: Optional[Sequence[float]] = None,
+) -> tuple[Path, Path]:
+    """Read the per-cycle ``horizon_predictions.csv`` and, per (model, dataset,
+    max_rul, n_units, seed, loss) cell, emit the two-sided earliness histogram
+    (``earliness.csv``) and the swept cost curve (``cost_curve.csv``) alongside the
+    horizon metrics. Pure post-processing of existing predictions -- no model runs, so
+    it needs no cache/GPU. ``bin_edges``/``cost_ratios`` default to the config fields.
+    Restartable: a cell already present in BOTH output files is skipped."""
+    import csv as _csv
+
+    preds_csv = Path(preds_csv) if preds_csv else config.results_path("horizon_predictions.csv")
+    earliness_csv = Path(earliness_csv) if earliness_csv else config.results_path("earliness.csv")
+    cost_csv = Path(cost_csv) if cost_csv else config.results_path("cost_curve.csv")
+    edges = list(bin_edges) if bin_edges is not None else list(config.earliness_bin_edges)
+    ratios = list(cost_ratios) if cost_ratios is not None else list(config.cost_ratios)
+    if not Path(preds_csv).exists():
+        raise FileNotFoundError(
+            f"predictions file {preds_csv} not found. Run run_horizon_eval first "
+            f"(it writes horizon_predictions.csv).")
+
+    groups: dict[tuple, tuple[list, list]] = {}
+    with open(preds_csv, newline="") as f:
+        for r in _csv.DictReader(f):
+            key = (r["model"], r["dataset"], r.get("max_rul", ""), r["n_units"],
+                   r["seed"], r["loss"])
+            yt, yp = groups.setdefault(key, ([], []))
+            yt.append(float(r["true_rul"]))
+            yp.append(float(r["pred"]))
+
+    done_e = completed_cells(earliness_csv, EARLINESS_KEYS)
+    done_c = completed_cells(cost_csv, EARLINESS_KEYS)
+    for key, (yt, yp) in sorted(groups.items()):
+        model, dataset, max_rul, n_units, seed, loss = key
+        base = {"model": model, "dataset": dataset, "max_rul": max_rul,
+                "n_units": int(n_units), "seed": int(seed), "loss": loss}
+        if key not in done_e:
+            hist = earliness_histogram(yt, yp, edges)
+            for b in hist["bins"]:
+                append_result_row(earliness_csv, {
+                    **base,
+                    "lo": "-inf" if np.isinf(b["lo"]) else b["lo"],
+                    "hi": "inf" if np.isinf(b["hi"]) else b["hi"],
+                    "side": b["side"], "n_bin": b["n_bin"], "frac": b["frac"],
+                    "frac_late": hist["frac_late"], "frac_early": hist["frac_early"],
+                    "mean_signed_error": hist["mean_signed_error"]})
+            done_e.add(key)
+        if key not in done_c:
+            for ratio, cost in cost_curve(yt, yp, ratios).items():
+                append_result_row(cost_csv, {**base, "cost_ratio": ratio, "cost": cost})
+            done_c.add(key)
+    return earliness_csv, cost_csv

@@ -12,6 +12,7 @@ Fixes to the original inline notebook plotting:
 """
 from __future__ import annotations
 
+import csv as _csv
 import re
 from pathlib import Path
 from typing import Optional
@@ -20,6 +21,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from .evaluate import aggregate_data_scaling, load_learning_curve, load_results
+
+# Verdict palette for the success map (Okabe-Ito, colorblind-safe -- matches the module
+# convention). win=green, loss=vermillion, tie=neutral gray, hollow=orange (a "win"
+# where everything fails, flagged apart). Ordered low->high for the discrete colormap.
+_VERDICT_ORDER = ("loss", "hollow", "tie", "win")
+_VERDICT_CODE = {v: i for i, v in enumerate(_VERDICT_ORDER)}
+_VERDICT_COLORS = {"loss": "#D55E00", "hollow": "#E69F00",
+                   "tie": "#BBBBBB", "win": "#009E73"}
+_VERDICT_INITIAL = {"loss": "L", "hollow": "H", "tie": "T", "win": "W"}
 
 # Okabe-Ito, fixed assignment per model family (never cycled). gbm_age shares
 # GBM's hue (same family, augmented features) but differs in marker + linestyle.
@@ -470,5 +480,180 @@ def plot_learning_curves(
     axes[0][0].set_ylabel(metric)
     fig.suptitle(f"Learning curves ({metric})")
     saved = _save(fig, out_dir, f"learning_curves_{metric}", prefix)
+    plt.show() if show else plt.close(fig)
+    return saved
+
+
+# ---------------------------------------------------------------------------
+# v2 "when do TSFMs work" figures (CHANGES.md §35-§37)
+# ---------------------------------------------------------------------------
+def _cond_sort_key(c):
+    """Sort conditions that may be ints (unit counts) or strings (factor levels):
+    numerics first (ascending), then strings (lexicographic)."""
+    try:
+        return (0, float(c), "")
+    except (TypeError, ValueError):
+        return (1, 0.0, str(c))
+
+
+def plot_success_map(
+    success_table: list,
+    out_dir: str | Path,
+    condition_field: Optional[str] = None,
+    show: bool = True,
+    prefix: str = "",
+) -> list[Path]:
+    """The headline figure: a win/tie/loss/hollow heatmap of models x conditions,
+    faceted per dataset (``scoring.success_map`` rows in, one PNG/PDF per dataset out).
+    ``condition_field`` is the column on the x-axis (auto: ``level`` for a probe table,
+    else ``n_units``). Each cell is colored by its verdict and annotated W/T/L/H."""
+    from matplotlib.colors import ListedColormap
+
+    out_dir = Path(out_dir)
+    rows = list(success_table)
+    if not rows:
+        raise ValueError("plot_success_map got an empty success table")
+    if condition_field is None:
+        condition_field = "level" if "level" in rows[0] else "n_units"
+    cmap = ListedColormap([_VERDICT_COLORS[v] for v in _VERDICT_ORDER]
+                          ).with_extremes(bad="#FFFFFF")
+    datasets = sorted({r.get("dataset", "") for r in rows}, key=lambda s: str(s))
+    saved: list[Path] = []
+    for ds in datasets:
+        sub = [r for r in rows if r.get("dataset", "") == ds]
+        models = sorted({r["model"] for r in sub})
+        conds = sorted({r[condition_field] for r in sub}, key=_cond_sort_key)
+        mi = {m: i for i, m in enumerate(models)}
+        ci = {c: j for j, c in enumerate(conds)}
+        grid = np.full((len(models), len(conds)), np.nan)
+        for r in sub:
+            grid[mi[r["model"]], ci[r[condition_field]]] = _VERDICT_CODE[r["verdict"]]
+        fig, ax = plt.subplots(figsize=(1.4 * len(conds) + 3, 0.6 * len(models) + 2))
+        ax.imshow(np.ma.masked_invalid(grid), cmap=cmap, vmin=-0.5, vmax=3.5, aspect="auto")
+        for r in sub:
+            ax.text(ci[r[condition_field]], mi[r["model"]], _VERDICT_INITIAL[r["verdict"]],
+                    ha="center", va="center", color="white", fontweight="bold", fontsize=9)
+        ax.set_xticks(range(len(conds)))
+        ax.set_xticklabels([str(c) for c in conds])
+        ax.set_yticks(range(len(models)))
+        ax.set_yticklabels(models)
+        ax.set_xlabel(condition_field)
+        ax.set_title(f"Success map ({ds or 'unknown dataset'})")
+        handles = [plt.matplotlib.patches.Patch(color=_VERDICT_COLORS[v], label=v)
+                   for v in ("win", "tie", "loss", "hollow")]
+        ax.legend(handles=handles, bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=8)
+        ds_tag = f"{ds}_" if len(datasets) > 1 and ds else ""
+        saved += _save(fig, out_dir, f"success_map_{ds_tag}{condition_field}", prefix)
+        plt.show() if show else plt.close(fig)
+    return saved
+
+
+def _read_csv_rows(path: str | Path) -> list[dict]:
+    with open(path, newline="") as f:
+        return list(_csv.DictReader(f))
+
+
+def plot_earliness(
+    earliness_csv: str | Path,
+    out_dir: str | Path,
+    show: bool = True,
+    prefix: str = "",
+) -> list[Path]:
+    """Two-sided earliness: per model, the mean fraction of predictions that are
+    dangerously LATE (d >= 0) vs wastefully EARLY (d < 0), averaged over cells/seeds
+    (``earliness.csv`` from ``horizon.run_earliness``)."""
+    out_dir = Path(out_dir)
+    # frac_late/frac_early are constant within a cell -> dedupe by cell before averaging
+    seen: dict[tuple, tuple[float, float]] = {}
+    for r in _read_csv_rows(earliness_csv):
+        key = (r["model"], r.get("n_units"), r.get("seed"), r.get("loss"))
+        seen[key] = (float(r["frac_late"]), float(r["frac_early"]))
+    per_model: dict[str, list[tuple[float, float]]] = {}
+    for (model, *_), fracs in seen.items():
+        per_model.setdefault(model, []).append(fracs)
+    models = sorted(per_model)
+    late = [float(np.mean([f[0] for f in per_model[m]])) for m in models]
+    early = [float(np.mean([f[1] for f in per_model[m]])) for m in models]
+    x = np.arange(len(models))
+    fig, ax = plt.subplots(figsize=(1.3 * len(models) + 3, 4.5))
+    ax.bar(x - 0.2, late, 0.4, color="#D55E00", label="dangerously late (d ≥ 0)")
+    ax.bar(x + 0.2, early, 0.4, color="#0072B2", label="wastefully early (d < 0)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(models, rotation=20, ha="right")
+    ax.set_ylabel("fraction of predictions")
+    ax.set_title("Earliness: dangerously late vs. wastefully early")
+    ax.grid(alpha=0.25, axis="y")
+    ax.legend(fontsize=8, framealpha=0.9)
+    saved = _save(fig, out_dir, "earliness", prefix)
+    plt.show() if show else plt.close(fig)
+    return saved
+
+
+def plot_cost_curve(
+    cost_curve_csv: str | Path,
+    out_dir: str | Path,
+    show: bool = True,
+    prefix: str = "",
+) -> list[Path]:
+    """Maintenance cost vs. the late:early cost ratio, one line per model (mean over
+    seeds/cells), log-log -- the "no single arbitrary ratio" view (``cost_curve.csv``)."""
+    out_dir = Path(out_dir)
+    series: dict[str, dict[float, list[float]]] = {}
+    for r in _read_csv_rows(cost_curve_csv):
+        series.setdefault(r["model"], {}).setdefault(
+            float(r["cost_ratio"]), []).append(float(r["cost"]))
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    for model in sorted(series):
+        by_ratio = series[model]
+        ratios = np.array(sorted(by_ratio))
+        mean = np.array([np.mean(by_ratio[r]) for r in ratios])
+        ax.plot(ratios, mean, marker="o", lw=2, ms=5, label=model,
+                color=_series_style(model)["color"])
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("late-cost : early-cost ratio")
+    ax.set_ylabel("total cost")
+    ax.set_title("Cost curve (late-vs-early trade-off swept)")
+    ax.grid(alpha=0.25, which="both")
+    ax.legend(fontsize=8, framealpha=0.9)
+    saved = _save(fig, out_dir, "cost_curve", prefix)
+    plt.show() if show else plt.close(fig)
+    return saved
+
+
+def plot_cross_tsfm(
+    fairness_csv: str | Path,
+    out_dir: str | Path,
+    metric: str = "rmse_clipped",
+    show: bool = True,
+    prefix: str = "",
+) -> list[Path]:
+    """The RQ-M five-model comparison: ``metric`` (mean +/- std over seeds) per model in
+    its NATIVE aggregation vs. the COMMON mean-pooled representation, so the ranking can
+    be checked for aggregation artifacts (``representation_fairness.csv``)."""
+    out_dir = Path(out_dir)
+    rows = load_results(fairness_csv)
+    series: dict[tuple[str, str], list[float]] = {}
+    for r in rows:
+        series.setdefault((r["model"], r.get("mode", "native")), []).append(float(r[metric]))
+    models = sorted({m for m, _ in series})
+    modes = ["native", "common"]
+    mode_color = {"native": "#0072B2", "common": "#E69F00"}
+    x = np.arange(len(models))
+    fig, ax = plt.subplots(figsize=(1.5 * len(models) + 3, 4.8))
+    for k, mode in enumerate(modes):
+        means = [float(np.mean(series[(m, mode)])) if (m, mode) in series else np.nan
+                 for m in models]
+        stds = [float(np.std(series[(m, mode)])) if (m, mode) in series else 0.0
+                for m in models]
+        ax.bar(x + (k - 0.5) * 0.4, means, 0.4, yerr=stds, capsize=3,
+               color=mode_color[mode], label=mode)
+    ax.set_xticks(x)
+    ax.set_xticklabels(models, rotation=20, ha="right")
+    ax.set_ylabel(metric)
+    ax.set_title("Cross-TSFM: native vs. common representation (RQ-M)")
+    ax.grid(alpha=0.25, axis="y")
+    ax.legend(fontsize=8, framealpha=0.9, title="aggregation")
+    saved = _save(fig, out_dir, f"cross_tsfm_{metric}", prefix)
     plt.show() if show else plt.close(fig)
     return saved

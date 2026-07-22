@@ -37,6 +37,8 @@ from .evaluate import (
 # constant and need not key cells; the ablation varies them, so it keys on them.
 CELL_KEYS = ["model", "dataset", "n_units", "seed", "loss"]  # dataset: multi-dataset CSVs (§21)
 ABLATION_KEYS = ["model", "dataset", "tsfm_context_length", "head_features", "pooling", "seed", "loss"]
+# The RQ-M representation-fairness run varies model x aggregation-mode x seed (§34).
+FAIRNESS_REP_KEYS = ["model", "dataset", "channel_aggregation", "pooling", "seed", "loss"]
 
 
 def resolve_unit_counts(counts, available: int) -> list[int]:
@@ -320,6 +322,65 @@ def run_ablation(
         _run_cell(cfg_p, _ensure_cache(cfg_p))
 
     return ablation_csv
+
+
+# ---------------------------------------------------------------------------
+# Cross-TSFM representation fairness (RQ-M; RESEARCH_PLAN §6; CHANGES.md §35)
+# ---------------------------------------------------------------------------
+def run_representation_fairness(
+    config: Config,
+    models: Optional[list[str]] = None,
+    device: str = "cpu",
+    seeds: Optional[list[int]] = None,
+    embedder_factory: Optional[Callable[[Config], object]] = None,
+    out_csv: Optional[str | Path] = None,
+) -> Path:
+    """Run every model TWICE at full data, MSE, ``seeds`` seeds, and record both to
+    ``representation_fairness.csv`` so the cross-TSFM ranking can be checked for
+    aggregation artifacts (RQ-M):
+
+    * ``native`` -- ``channel_aggregation="concat"`` at the model's own default
+      pooling (``config.pooling``): how a practitioner actually uses each backbone.
+    * ``common`` -- ``channel_aggregation="mean"``, ``pooling="mean"``: all models on
+      one mean-pooled common representation, the fairness control.
+
+    Each (model, mode) has its own Stage A cache (the keys differ by aggregation +
+    pooling), built idempotently; ``embedder_factory`` injects a CPU mock. Restartable
+    via completed-cell detection on (model, aggregation, pooling, seed)."""
+    from .embeddings import build_embedding_cache, load_embedding_cache
+    from .models import EMBEDDERS
+
+    models = models if models is not None else sorted(EMBEDDERS)
+    seeds = seeds if seeds is not None else [0, 1, 2]
+    out_csv = Path(out_csv) if out_csv else config.results_path("representation_fairness.csv")
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    done = completed_cells(out_csv, FAIRNESS_REP_KEYS)
+    # (mode label, config overrides). native keeps the model's default pooling.
+    arms = [("native", {"channel_aggregation": "concat"}),
+            ("common", {"channel_aggregation": "mean", "pooling": "mean"})]
+
+    for model_name in models:
+        for mode, over in arms:
+            cfg = config.replace(model_name=model_name, **over)
+            emb = embedder_factory(cfg) if embedder_factory is not None else None
+            build_embedding_cache(cfg, embedder=emb)  # idempotent per (model, mode)
+            dc = _to_device_cache(load_embedding_cache(cfg), device)
+            all_units = np.unique(dc["tr_u"])
+            model_tag = model_name.split("/")[-1] + "_mlp"
+            for seed in seeds:
+                key = (model_tag, cfg.dataset, cfg.channel_aggregation, cfg.pooling,
+                       str(seed), "mse")
+                if key in done:
+                    continue
+                train_u, val_u = data_mod.unit_train_val_split(all_units, cfg.val_fraction, seed)
+                tr_mask, va_mask = np.isin(dc["tr_u"], train_u), np.isin(dc["tr_u"], val_u)
+                pred = _fit_predict_tsfm(cfg, dc, tr_mask, va_mask, "mse", seed, device)
+                row = _row(cfg, model_tag, len(all_units), seed, "mse", dc["te_y"], pred)
+                row["mode"] = mode
+                row["channel_aggregation"] = cfg.channel_aggregation
+                append_result_row(out_csv, row)
+                done.add(key)
+    return out_csv
 
 
 def select_best_ablation_cell(ablation_csv: str | Path,

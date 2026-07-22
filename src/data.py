@@ -54,7 +54,76 @@ def load_prepared(config: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
     df_test = add_test_rul(df_test, rul_truth, config)
     if config.effective_condition_norm():
         df_train, df_test = condition_normalize(df_train, df_test, config)
+    # RQ-H sim-only perturbation: applied AFTER labels + normalization, BEFORE
+    # windowing (CHANGES.md §38). No-op unless config.noise_injection is set.
+    if config.noise_injection:
+        df_train, df_test = apply_noise_injection(df_train, df_test, config)
     return df_train, df_test
+
+
+# ---------------------------------------------------------------------------
+# Sim-only noise/drift injection (RQ-H, perturbative; RESEARCH_PLAN §1; CHANGES.md §38)
+# ---------------------------------------------------------------------------
+def inject_noise(
+    df: pd.DataFrame, sensor_columns: list, spec: dict, seed: int
+) -> pd.DataFrame:
+    """Return a copy of ``df`` with ``sensor_columns`` perturbed per ``spec`` (a
+    ``config.noise_injection`` dict). Deterministic in ``seed`` -- a fixed seed + spec
+    reproduces the same perturbed series. Perturbation magnitudes are expressed in
+    per-channel std units, so the effect is comparable across channels and datasets.
+    DECISION (uncited): the three kinds and their default parameters.
+
+      * ``gaussian`` -- additive white noise at ``snr_db`` (default 20): per-channel
+        noise std = channel_std / sqrt(10**(snr_db/10)).
+      * ``drift``    -- a per-unit linear bias ramp reaching ``magnitude`` (default 1)
+        channel-std by each unit's last cycle (a slow calibration drift).
+      * ``dropout``  -- each (row, channel) is blanked to 0 with probability ``rate``
+        (default 0.1), the random sensor-dropout failure mode.
+    """
+    kind = spec["kind"]
+    rng = np.random.default_rng(seed)
+    out = df.copy()
+    X = out[sensor_columns].to_numpy(np.float64, copy=True)  # (rows, C)
+    std = X.std(axis=0)
+    std[std < 1e-8] = 1.0                                    # guard flat channels
+    if kind == "gaussian":
+        snr_db = float(spec.get("snr_db", 20.0))
+        noise_std = std / np.sqrt(10.0 ** (snr_db / 10.0))
+        X = X + rng.normal(0.0, 1.0, size=X.shape) * noise_std
+    elif kind == "drift":
+        magnitude = float(spec.get("magnitude", 1.0))
+        # per-unit 0..1 progress by cycle order (order-independent), scaled to std.
+        rank = out.groupby("unit_number")["time_cycles"].rank(method="first") - 1.0
+        size = out.groupby("unit_number")["time_cycles"].transform("size")
+        frac = np.where(size > 1, rank / (size - 1).clip(lower=1), 0.0)
+        X = X + frac[:, None] * (magnitude * std)
+    else:  # "dropout" (kinds are validated in Config.__post_init__)
+        rate = float(spec.get("rate", 0.1))
+        X[rng.random(X.shape) < rate] = 0.0
+    out[sensor_columns] = X
+    return out
+
+
+def apply_noise_injection(
+    df_train: pd.DataFrame, df_test: pd.DataFrame, config: Config
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Guarded application of ``config.noise_injection`` to both frames. RAISES on a
+    REAL dataset -- perturbing real sensor readings is out of scope by design
+    (RESEARCH_PLAN §1); the guard reports both the expected (simulated) families and
+    the observed dataset. Train/test get distinct-but-reproducible seeds so the two
+    perturbations are independent yet deterministic."""
+    if not config.is_simulated_dataset():
+        from .config import SIMULATED_DATASET_KINDS
+        raise ValueError(
+            f"noise_injection is sim-only (RQ-H): allowed for simulated families "
+            f"{SIMULATED_DATASET_KINDS}, but dataset {config.dataset!r} is real "
+            f"(kind {config.dataset_kind()!r}). Perturbing real readings is out of "
+            f"scope -- cover the noise axis observationally on real data instead.")
+    spec = config.noise_injection
+    base = int(spec.get("seed", config.seed))
+    cols = config.sensor_columns
+    return (inject_noise(df_train, cols, spec, base),
+            inject_noise(df_test, cols, spec, base + 1))
 
 
 # ---------------------------------------------------------------------------

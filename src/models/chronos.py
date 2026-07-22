@@ -26,6 +26,7 @@ class ChronosEmbedder:
         self.config = config
         self.model_name = config.model_name
         self.pooling = config.pooling
+        self.channel_aggregation = config.channel_aggregation  # RQ-M knob (§34)
         self.batch_size = config.embed_batch_size
         self.dtype = config.embed_dtype
         self.context_length = config.effective_tsfm_context()
@@ -88,11 +89,15 @@ class ChronosEmbedder:
                 embeddings, loc_scale = pipeline.embed(
                     inp, batch_size=len(inp), context_length=self.context_length,
                 )
+            # Chronos-2's embed() appends 2 special tokens (REG, forecast), so pool
+            # with n_special_tokens=2; channel_aggregation is the RQ-M knob (§34).
             if flatten:
                 for emb in embeddings:
-                    feats.append(_pool_one_torch(emb, self.pooling).to(torch.float32).cpu().numpy())
+                    feats.append(_pool_one_torch(emb, self.pooling, self.channel_aggregation)
+                                 .to(torch.float32).cpu().numpy())
             else:
-                pooled = torch.stack([_pool_one_torch(e, self.pooling) for e in embeddings])
+                pooled = torch.stack([_pool_one_torch(e, self.pooling, self.channel_aggregation)
+                                      for e in embeddings])
                 feats.append(pooled.to(torch.float32).cpu().numpy())  # one transfer / batch
             ls_batches.append(extract_loc_scale(loc_scale, len(inp), n_variates))
         dt = time.perf_counter() - t0
@@ -109,6 +114,7 @@ class ChronosEmbedder:
             "embedder": "ChronosEmbedder",
             "model_name": self.model_name,
             "pooling": self.pooling,
+            "channel_aggregation": self.channel_aggregation,
             "dtype": self.dtype,
             "tsfm_context_length": self.context_length,
         }

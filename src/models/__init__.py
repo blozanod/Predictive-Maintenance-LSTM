@@ -16,10 +16,21 @@ from typing import Optional
 
 from ..config import Config
 from .chronos import ChronosEmbedder
+from .moirai import MoiraiEmbedder
+from .moment import MomentEmbedder
+from .timesfm import TimesFMEmbedder
+from .ttm import TTMEmbedder
 
-# model_name (config.model_name) -> embedder class.
+# model_name (config.model_name) -> embedder class. Five TSFMs across three families
+# (RESEARCH_PLAN §6): multivariate-native (Chronos-2, Moirai-2), univariate (MOMENT,
+# TimesFM), tiny channel-mixing (TTM). The four v2 backbones share the plain-patch
+# base (models/base.py); only their backbone load/call differ (CHANGES.md §34).
 EMBEDDERS = {
     "amazon/chronos-2": ChronosEmbedder,
+    "Salesforce/moirai-2": MoiraiEmbedder,
+    "AutonLab/MOMENT-1-large": MomentEmbedder,
+    "google/timesfm-2.5": TimesFMEmbedder,
+    "ibm-granite/granite-timeseries-ttm-r2": TTMEmbedder,
 }
 
 
@@ -34,4 +45,5 @@ def make_embedder(config: Config, device: Optional[str] = None):
     return EMBEDDERS[name](config, device=device)
 
 
-__all__ = ["EMBEDDERS", "make_embedder", "ChronosEmbedder"]
+__all__ = ["EMBEDDERS", "make_embedder", "ChronosEmbedder", "MoiraiEmbedder",
+           "MomentEmbedder", "TimesFMEmbedder", "TTMEmbedder"]
