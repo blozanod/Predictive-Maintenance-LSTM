@@ -590,6 +590,64 @@ The sub-dataset `DS08d` (`N-CMAPSS_DS08d-010.h5`) was found to be corrupted in t
 - **Exclusion policy.** Because this corruption exists in the NASA source file itself, all public mirrors (such as Kaggle) suffer from the same truncation. Standard practice in the research community is to exclude `DS08d` from runs.
 - **Code modifications.** Removed `"DS08d"` from `NCMAPSS_DATASETS` in `src/config.py` and from the active campaign overrides (`DEFAULT_DATASET_OVERRIDES["DSALL"]["dsall_datasets"]` in `src/campaign.py`) so the combined `DSALL` dataset and campaign sweeps run cleanly over the remaining nine valid datasets.
 
+## 32. Milestone 0 — coverage gate, provenance backbones, mock parametrization
+First foundations of the v2 "when do TSFMs work" build (IMPLEMENTATION_PLAN §3, Phase A).
+Small, additive, unblocks Milestones 1–2. No cache key, CSV schema, or recorded-result
+change; the FD001 stable-key test is untouched and green.
+- **Coverage gate (M0.1).** `.coveragerc` pins branch coverage of `src/` with
+  `fail_under = 100`; `pytest-cov` added to `requirements.txt` (and `matplotlib`, a
+  module-level import in `src/plots.py`, promoted from "Colab ships it" to a listed core
+  dep so the gate runs standalone in CI). `README.md` documents
+  `pytest -q --cov=src --cov-branch`. **The `# pragma: no cover` boundary
+  (`DECISION (uncited)`):** the single line where a lazy backbone/dataset library is first
+  imported (e.g. `from chronos import Chronos2Pipeline`) is the ONLY sanctioned pragma;
+  everything above it — shape handling, pooling, loc/scale, caching, scoring — is covered
+  by mocks (`tests/synthetic.py`). coverage.py cannot enforce *where* a pragma sits, so
+  that boundary is a review rule, recorded in `.coveragerc` comments and here.
+  **Phasing note:** 100% is the *Milestone-2* acceptance gate; M0 only stands up the
+  tooling. Until Milestones 1–2 cover every module (and pragma the lazy imports), the
+  command reports the current `src/` coverage as below 100% by design — plain `pytest -q`
+  (no `--cov`) stays fully green.
+- **Provenance backbones (M0.2).** `evaluate.package_versions()` now also records
+  `momentfm`, `uni2ts`, `timesfm`, `tsfm_public`, `pycatch22`, `sksurv`, and `lifelines`
+  (the four new TSFMs + the catch22 foil + the censored-metric libs, §2). Absent modules
+  report `"not-installed"`, so the run-metadata JSON states exactly which backbone/library
+  builds produced a run without requiring any of them to be installed.
+- **Mock parametrization (M0.3).** `tests/synthetic.py::MockEmbedder` gains `layout`
+  (`"multivariate"` default, Chronos-2/Moirai/TTM-like joint embed with special tokens vs
+  `"univariate"`, MOMENT/TimesFM-like per-channel embed with no special tokens) and
+  `channel_aggregation` (`"concat"`/`"mean"`, the RQ-M fairness knob M1 adds as a real
+  `Config` field). Feature width `F`: multivariate → `feature_dim` (both agg modes
+  coincide — the joint summary is already channel-collapsed, a documented mock
+  simplification); univariate → `C·feature_dim` (concat) or `feature_dim` (mean). The
+  defaults (`multivariate`, `concat`) reproduce the original fixture byte-for-byte
+  (`F == feature_dim`, `test_smoke` still asserts `emb.shape == (N, 16)`), so every
+  pre-M0 test stays green. New tests in `test_embeddings.py` cover both layouts, the
+  aggregation modes, the empty-context edge case, `describe()` keys, and the param guards.
+- **Stale-test fix (housekeeping).** `test_campaign.py`'s DSALL assertion hard-coded 10
+  members; §31 removed the corrupted DS08d, leaving 9. The assertion now compares against
+  `DEFAULT_DATASET_OVERRIDES["DSALL"]["dsall_datasets"]` directly so a member-list change
+  never re-stales it.
+
+## 33. Notebooks: per-dataset-family, self-cloning from GitHub
+The Drive-hosted monolith `notebooks/colab_main.ipynb` (one serial run-all across every
+dataset, with the whole repo mirrored on Drive and re-uploaded on every change) is replaced
+by **three parallel per-family notebooks** — `notebooks/cmapss.ipynb` (FD001–FD004, plus the
+gated FD001 deep-dives), `notebooks/xjtu.ipynb` (XJTU-SY), `notebooks/ncmapss.ipynb`
+(DS01–DS08c + DSALL) — so each family runs on its own Colab runtime simultaneously instead
+of one after another. Each notebook restricts `run_campaign(config, datasets=…)` to its
+family (derived from the registry via `datasets.<family>.DATASETS`, so it self-maintains).
+- **Self-cloning setup (the reason Drive can shed everything but notebooks + data).** The
+  setup cell `git clone`s the **public** repo (`https://github.com/blozanod/Predictive-
+  Maintenance-LSTM.git`) fresh into the ephemeral Colab filesystem and puts *that* clone on
+  `sys.path` — re-run-safe (`git pull --ff-only` if already cloned). Drive now holds ONLY
+  `Data/`, the embedding `cache/`, and `results/` (the persistent artifacts); code is never
+  re-uploaded. A `REPO_BRANCH` knob (default `main`) selects the branch to pull.
+- Drive layout, per-dataset overrides, and the recorded §12 winner config are unchanged; the
+  deep-dive sections (ablation, raised-cap, transfer) live in the C-MAPSS notebook, gated on
+  `RUN_DEEP_DIVES` exactly as before. `README.md`'s "Run on Colab" section is rewritten for
+  the three notebooks.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 TimesFM/MOMENT/TTM/Moirai (register a new `src/models/` module under its
 `model_name`, §23); experiment-tracking services; CLI frameworks. No result numbers,

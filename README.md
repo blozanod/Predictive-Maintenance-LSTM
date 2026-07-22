@@ -58,9 +58,12 @@ src/
   transfer.py    plots.py Stage C figures. All result files are prefixed with
   plots.py       config.experiment_name (config.results_path / figures_dir helpers).
 tests/           CPU-only smoke tests (no GPU, no C-MAPSS download).
-notebooks/
-  colab_main.ipynb   Thin orchestrator: Setup → Stage A (embed once) → Stage A2
-                     (ablation → winner) → Stage B (sweep at winner) → Stage C (plots).
+notebooks/       One notebook per dataset family, each self-cloning the repo from GitHub
+  cmapss.ipynb   and pointing at Drive for data/cache/results only — so they run in
+  xjtu.ipynb     PARALLEL on separate Colab runtimes. Each: Setup (clone + mount) →
+  ncmapss.ipynb  Config → Campaign (run_campaign restricted to that family). cmapss.ipynb
+                 also carries the gated FD001 deep-dives (ablation → winner, sweep,
+                 raised-cap, transfer, plots).
 ```
 
 ## Run the tests (CPU, no download)
@@ -70,24 +73,44 @@ pip install -r requirements.txt
 pytest -q
 ```
 
+### Coverage gate
+
+```bash
+pytest -q --cov=src --cov-branch     # .coveragerc pins fail_under=100 for src/
+```
+
+100% line + branch coverage of `src/` is the repo gate (invariant §8). Every heavy
+backbone/dataset library is lazily imported inside a `_load_*` method the CPU tests never
+reach; the **only** sanctioned `# pragma: no cover` is that single lazy-import line
+(everything above it is covered by mocks — `tests/synthetic.py`). See `CHANGES.md` §32.
+100% is the Milestone-2 acceptance gate; Milestone 0 stands up this tooling, so until
+Milestones 1–2 finish covering every module the command reports below 100% by design.
+
 ## Run on Colab
 
-Open `notebooks/colab_main.ipynb` and hit **Run all** (CHANGES.md §24):
+There are **three notebooks, one per dataset family** — `notebooks/cmapss.ipynb`,
+`notebooks/xjtu.ipynb`, `notebooks/ncmapss.ipynb` — so each family runs on its own Colab
+runtime **in parallel** (CHANGES.md §33). On Drive you keep **only the notebooks and the
+data**; each notebook **clones the code from GitHub** into Colab's ephemeral disk, so you
+never mirror or re-upload the repo. Open one (or several at once) and hit **Run all**:
 
-1. **Setup** — installs, mount Drive, add repo to `sys.path`, print GPU.
-2. **Config** — point `data_root`/`cache_dir`/`results_dir` at your Drive (raw
-   datasets live under one `data_root`: `Data/CMAPSSData`, `Data/XJTU-SY`,
-   `Data/N-CMAPSS`). Defaults are the recorded FD001 ablation winner (CHANGES.md §12).
-3. **Campaign** — `run_campaign(config)`: every dataset in `src/datasets/`
-   (FD001–FD004 + XJTU-SY + N-CMAPSS DS01–DS08d + the combined DSALL fleet) × every
-   TSFM in `src/models/`; per combo it runs Stage A cache → data-scaling sweep →
-   fairness arms → horizon eval → saved figures, each stage restartable. Per-dataset
-   protocol choices come from `campaign.DEFAULT_DATASET_OVERRIDES` (CHANGES.md §30).
-   Datasets not downloaded into `Data/` are skipped with a notice; every artifact is
-   named `<dataset>_<model>_…` (e.g. `results/FD002_chronos-2_results_v2.csv`).
-4. **Deep-dives** (optional; set `RUN_DEEP_DIVES = True` in the Config cell) —
-   the single-dataset studies: the context/feature ablation, learning curves, the
-   CORN-vs-MSE paired-significance table, the raised-label-cap arm (max_rul=200),
+1. **Setup** — installs, mount Drive, `git clone` the public repo into `/content`, put that
+   clone on `sys.path`, print GPU. The clone is re-run-safe (fast-forwards if present); set
+   `REPO_BRANCH` to run a branch other than `main`.
+2. **Config** — set `DRIVE` to the Drive folder holding your `Data/` (raw datasets live under
+   one `data_root`: `Data/CMAPSSData`, `Data/XJTU-SY`, `Data/N-CMAPSS`); `cache/` and
+   `results/` are written there too. Defaults are the recorded FD001 ablation winner
+   (CHANGES.md §12).
+3. **Campaign** — `run_campaign(config, datasets=…)` restricted to that family: C-MAPSS
+   FD001–FD004 · XJTU-SY · N-CMAPSS DS01–DS08c + the combined DSALL fleet. Per combo it runs
+   Stage A cache → data-scaling sweep → fairness arms → horizon eval → saved figures, each
+   stage restartable. Per-dataset protocol choices come from
+   `campaign.DEFAULT_DATASET_OVERRIDES` (CHANGES.md §30). Datasets not downloaded into
+   `Data/` are skipped with a notice; every artifact is named `<dataset>_<model>_…`
+   (e.g. `results/FD002_chronos-2_results_v2.csv`).
+4. **Deep-dives** (in `cmapss.ipynb` only; optional — set `RUN_DEEP_DIVES = True` in its
+   Config cell) — the single-dataset FD001 studies: the context/feature ablation, learning
+   curves, the CORN-vs-MSE paired-significance table, the raised-label-cap arm (max_rul=200),
    and the FD001→FD003 cold-start transfer.
 
 ## Audit the uncited decisions

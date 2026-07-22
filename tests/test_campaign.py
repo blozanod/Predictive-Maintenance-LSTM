@@ -107,9 +107,13 @@ def test_campaign_combo_config_applies_default_overrides(tmp_path):
     assert cfg.max_rul == 125 and cfg.window_size == 30
     assert cfg.tsfm_context_length == 256
     assert cfg.sensor_columns == list(XJTU_FEATURE_COLUMNS)   # dataset default
-    # DSALL combo pins the member list (deterministic cache key)
+    # DSALL combo pins the member list (deterministic cache key). Tie the assertion to
+    # the recorded pinned list so the §31 DS08d exclusion (or any future member change)
+    # never re-stales it.
+    from src.campaign import DEFAULT_DATASET_OVERRIDES
+    pinned = DEFAULT_DATASET_OVERRIDES["DSALL"]["dsall_datasets"]
     dsall = _combo_config(base, "DSALL", "amazon/chronos-2", over)
-    assert dsall.dsall_datasets[0] == "DS01" and len(dsall.dsall_datasets) == 10
+    assert dsall.dsall_datasets[0] == "DS01" and dsall.dsall_datasets == pinned
 
 
 def test_campaign_isolates_failures_but_raises_when_all_fail(tmp_path):

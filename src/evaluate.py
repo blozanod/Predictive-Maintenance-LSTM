@@ -87,9 +87,17 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray,
 # ---------------------------------------------------------------------------
 def package_versions() -> dict:
     import importlib
+    # The v2 "when do TSFMs work" build adds four more backbones and the censoring /
+    # cheap-feature libraries (IMPLEMENTATION_PLAN §2); record their versions in the
+    # provenance JSON so a run states exactly which backbone/library builds produced it.
+    # Modules absent on a given machine simply report "not-installed" -- the import names
+    # are momentfm (MOMENT), uni2ts (Moirai), timesfm (TimesFM), tsfm_public (granite-tsfm
+    # / TTM), pycatch22 (catch22 foil), and sksurv/lifelines (censored metrics).
     versions = {}
     for m in ["numpy", "pandas", "scipy", "sklearn", "torch",
-              "coral_pytorch", "chronos", "lightgbm", "sktime"]:
+              "coral_pytorch", "chronos", "lightgbm", "sktime",
+              "momentfm", "uni2ts", "timesfm", "tsfm_public", "pycatch22",
+              "sksurv", "lifelines"]:
         try:
             versions[m] = getattr(importlib.import_module(m), "__version__", "unknown")
         except Exception:
