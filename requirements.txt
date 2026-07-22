@@ -8,6 +8,7 @@ pandas>=2.0
 scipy>=1.11
 scikit-learn>=1.3
 torch>=2.1
+matplotlib>=3.7           # src/plots.py figures (module-level import); Colab ships it, CI needs it
 h5py>=3.10                # N-CMAPSS .h5 loader (src/datasets/ncmapss.py); tests write synthetic h5
 
 # --- losses / baselines ---
@@ -20,5 +21,6 @@ numba>=0.59              # required by sktime's MiniRocket
 chronos-forecasting>=2.0.0   # official Chronos2Pipeline.embed()
 safetensors>=0.4
 
-# --- test ---
+# --- test / coverage gate (IMPLEMENTATION_PLAN M0.1; CHANGES.md §32) ---
 pytest>=7.0
+pytest-cov>=4.0          # `pytest -q --cov=src --cov-branch`; .coveragerc pins fail_under=100

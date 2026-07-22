@@ -92,22 +92,83 @@ def _write(path: Path, arr: np.ndarray) -> None:
 
 
 class MockEmbedder:
-    """Deterministic random-projection stand-in for ``ChronosEmbedder``.
+    """Deterministic random-projection stand-in for a frozen-TSFM embedder.
 
-    Same interface (``embed_windows(contexts) -> (emb, loc_scale)`` / ``describe``),
-    CPU-only, no downloads. Accepts variable-length contexts (a list of ``(L_i, C)``
-    arrays) or a fixed ``(N, W, C)`` array, mirroring embed()'s native input. The
-    ``loc_scale`` return is the per-channel mean/std of each context (shape
-    ``(N, C, 2)``), standing in for Chronos-2's instance-norm loc/scale. Counts calls
-    so tests can assert Stage A idempotency and that sweeps never re-embed.
+    Same interface as ``ChronosEmbedder``
+    (``embed_windows(contexts) -> (emb (N, F) float32, loc_scale (N, C, 2) float32)`` /
+    ``describe``), CPU-only, no downloads. Accepts variable-length contexts (a list of
+    ``(L_i, C)`` arrays) or a fixed ``(N, W, C)`` array, mirroring embed()'s native
+    input. ``loc_scale`` is the per-channel mean/std of each context (shape ``(N, C, 2)``),
+    standing in for Chronos-2's instance-norm loc/scale. Call count is tracked so tests
+    can assert Stage A idempotency and that sweeps never re-embed.
+
+    Parametrized (IMPLEMENTATION_PLAN M0.3) so ONE mock can stand in for either backbone
+    FAMILY the v2 build adds, distinguished by the shape of the pooled feature vector:
+
+    * ``layout="multivariate"`` (default -- Chronos-2 / Moirai / TTM-like): the backbone
+      embeds all channels JOINTLY (and appends REG + forecast special tokens); one pooled
+      summary of width ``feature_dim`` (= the mock's ``d_model``) represents the window, so
+      ``F`` does NOT grow with the channel count.
+    * ``layout="univariate"`` (MOMENT / TimesFM-like): the backbone embeds EACH channel
+      independently through a shared 1-D projection (no special tokens); the per-variate
+      vectors are combined by ``channel_aggregation``.
+
+    ``channel_aggregation`` is the RQ-M fairness knob (M1's ``config.channel_aggregation``):
+    ``"concat"`` keeps per-variate detail, ``"mean"`` collapses the variate axis to a common
+    representation. It applies to BOTH layouts, exactly as the real knob applies uniformly
+    across every model. Resulting feature width ``F``:
+
+    | layout        | concat            | mean        |
+    |---------------|-------------------|-------------|
+    | multivariate  | ``feature_dim``   | ``feature_dim`` |
+    | univariate    | ``C * feature_dim`` | ``feature_dim`` |
+
+    (The multivariate mock's joint summary is already channel-collapsed, so its two
+    aggregation modes coincide -- a deliberate mock simplification; the univariate mock is
+    where ``concat`` vs ``mean`` genuinely changes the output dim, which is the property M1
+    tests exercise.)
+
+    Backwards-compatibility: with the defaults (``layout="multivariate"``,
+    ``channel_aggregation="concat"``) ``MockEmbedder(feature_dim=F)`` reproduces the
+    original fixture byte-for-byte -- ``F == feature_dim`` independent of channel count --
+    so every pre-M0 test stays green.
     """
 
-    def __init__(self, feature_dim: int = 32, seed: int = 0):
+    def __init__(self, feature_dim: int = 32, seed: int = 0,
+                 layout: str = "multivariate", channel_aggregation: str = "concat"):
+        if layout not in ("multivariate", "univariate"):
+            raise ValueError(f"layout must be 'multivariate' or 'univariate', got {layout!r}")
+        if channel_aggregation not in ("concat", "mean"):
+            raise ValueError("channel_aggregation must be 'concat' or 'mean', got "
+                             f"{channel_aggregation!r}")
         self.feature_dim = feature_dim
         self.seed = seed
+        self.layout = layout
+        self.channel_aggregation = channel_aggregation
         self.n_calls = 0
         self._proj = None
         self.last_throughput = None
+
+    def _ensure_proj(self, n_channels: int) -> None:
+        # multivariate: one (C, d_model) projection of the joint channel-mean vector.
+        # univariate:   one (1, d_model) projection applied to each channel independently.
+        want = n_channels if self.layout == "multivariate" else 1
+        if self._proj is None or self._proj.shape[0] != want:
+            rng = np.random.default_rng(self.seed)
+            self._proj = rng.normal(0, 1, size=(want, self.feature_dim)).astype(np.float32)
+
+    def _pool(self, mean_t: np.ndarray) -> np.ndarray:
+        """Pooled feature vector for one window from its per-channel mean ``(C,)``."""
+        if self.layout == "multivariate":
+            # Joint summary already fuses every channel -> width feature_dim; the two
+            # channel_aggregation modes coincide (see class docstring). The concat/default
+            # path is byte-identical to the original fixture.
+            return np.tanh(mean_t @ self._proj)                       # (feature_dim,)
+        # univariate: embed each channel through the shared (1, feature_dim) projection.
+        per_variate = np.tanh(mean_t[:, None] @ self._proj)           # (C, feature_dim)
+        if self.channel_aggregation == "concat":
+            return per_variate.reshape(-1)                            # (C * feature_dim,)
+        return per_variate.mean(axis=0)                               # (feature_dim,)
 
     def embed_windows(self, contexts) -> tuple[np.ndarray, np.ndarray]:
         self.n_calls += 1
@@ -118,20 +179,20 @@ class MockEmbedder:
         if not ctx:
             return np.empty((0, self.feature_dim), np.float32), np.empty((0, 0, 2), np.float32)
         n_channels = ctx[0].shape[1]
-        if self._proj is None or self._proj.shape[0] != n_channels:
-            rng = np.random.default_rng(self.seed)
-            self._proj = rng.normal(0, 1, size=(n_channels, self.feature_dim)).astype(np.float32)
+        self._ensure_proj(n_channels)
         feats, loc_scale = [], []
         for w in ctx:                        # w: (L_i, C), variable L_i
             w = np.asarray(w, np.float32)
             mean_t = w.mean(axis=0)          # (C,)
             std_t = w.std(axis=0)            # (C,)
-            feats.append(np.tanh(mean_t @ self._proj))            # (feature_dim,)
+            feats.append(self._pool(mean_t))                      # (F,)
             loc_scale.append(np.stack([mean_t, std_t], axis=-1))  # (C, 2)
         return (np.asarray(feats, np.float32), np.asarray(loc_scale, np.float32))
 
     def describe(self) -> dict:
-        return {"embedder": "MockEmbedder", "feature_dim": self.feature_dim, "seed": self.seed}
+        return {"embedder": "MockEmbedder", "feature_dim": self.feature_dim,
+                "seed": self.seed, "layout": self.layout,
+                "channel_aggregation": self.channel_aggregation}
 
 
 def write_synthetic_ncmapss(

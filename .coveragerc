@@ -1,0 +1,26 @@
+# Coverage configuration for the src/ gate (IMPLEMENTATION_PLAN M0.1; CHANGES.md §32).
+#
+# The gate: `pytest -q --cov=src --cov-branch` must reach 100% LINE + BRANCH coverage of
+# src/ (repo invariant §8 / RESEARCH_PLAN §9). It is CPU-only, GPU-free, download-free:
+# every heavy backbone / dataset library is lazily imported inside a `_load_*` method that
+# pytest never reaches, and the ONLY place a `# pragma: no cover` is sanctioned is that
+# single lazy-import line (e.g. `from chronos import Chronos2Pipeline`). Everything above
+# it -- shape handling, pooling, loc/scale, caching, scoring -- is exercised through mocks
+# (tests/synthetic.py: MockEmbedder + the synthetic dataset fixtures). coverage.py cannot
+# enforce WHERE a pragma is used, so that boundary is a review rule, documented here and in
+# CHANGES.md §32; a pragma anywhere else fails review.
+#
+# NOTE: 100% is the Milestone-2 acceptance gate. Milestone 0 only stands up this tooling;
+# until Milestones 1-2 finish covering every module (and pragma the lazy imports), the gate
+# legitimately reports the current src/ coverage as below 100%.
+
+[run]
+branch = True
+source = src
+
+[report]
+fail_under = 100
+show_missing = True
+# Default coverage pragma, kept working; sanctioned ONLY on the lazy heavy-import line.
+exclude_lines =
+    pragma: no cover

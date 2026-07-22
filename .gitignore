@@ -5,6 +5,12 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 
+# Coverage gate artifacts (.coveragerc is tracked; its output is not)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
 # Generated pipeline artifacts (Task 2.5: no results in the repo)
 cache/
 results/

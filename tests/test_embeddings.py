@@ -186,3 +186,74 @@ def test_evaluate_both_protocols():
     assert m["rmse_unclipped"] == pytest.approx(rmse(y_true, y_pred))
     assert m["rmse_unclipped"] > m["rmse_clipped"]  # unclipped protocol is inflated
     assert m["n"] == 3
+
+
+# ---------------------------------------------------------------------------
+# MockEmbedder layout / channel-aggregation parametrization (M0.3)
+# ---------------------------------------------------------------------------
+def _ctx(n_windows=4, length=6, n_channels=5, seed=1):
+    rng = np.random.default_rng(seed)
+    return [rng.normal(size=(length, n_channels)).astype(np.float32) for _ in range(n_windows)]
+
+
+def test_mock_default_is_backward_compatible():
+    """Defaults (multivariate, concat) reproduce the ORIGINAL fixture byte-for-byte:
+    F == feature_dim regardless of channel count, and the exact tanh(mean @ proj)."""
+    C, F = 5, 16
+    ctx = _ctx(n_windows=3, n_channels=C)
+    emb, ls = MockEmbedder(feature_dim=F, seed=0).embed_windows(ctx)
+    assert emb.shape == (3, F)                      # width == feature_dim, NOT C * F
+    assert ls.shape == (3, C, 2)
+    # reference: the original single-vector formula
+    proj = np.random.default_rng(0).normal(0, 1, size=(C, F)).astype(np.float32)
+    ref = np.stack([np.tanh(np.asarray(w, np.float32).mean(0) @ proj) for w in ctx])
+    assert np.allclose(emb, ref)
+
+
+def test_mock_univariate_concat_grows_with_channels():
+    """Univariate layout embeds per channel -> concat width is C * feature_dim
+    (the property that distinguishes MOMENT/TimesFM-like backbones)."""
+    C, F = 5, 8
+    ctx = _ctx(n_windows=4, n_channels=C)
+    emb, ls = MockEmbedder(feature_dim=F, layout="univariate",
+                           channel_aggregation="concat").embed_windows(ctx)
+    assert emb.shape == (4, C * F)
+    assert ls.shape == (4, C, 2)
+
+
+def test_mock_univariate_mean_collapses_variate_axis():
+    """Mean aggregation collapses the variate axis to a common representation of width
+    feature_dim (the RQ-M fairness control)."""
+    C, F = 5, 8
+    ctx = _ctx(n_windows=4, n_channels=C)
+    emb, _ = MockEmbedder(feature_dim=F, layout="univariate",
+                          channel_aggregation="mean").embed_windows(ctx)
+    assert emb.shape == (4, F)
+
+
+def test_mock_multivariate_aggregation_modes_coincide():
+    """The multivariate joint summary is already channel-collapsed, so concat/mean give
+    the same width feature_dim (documented mock simplification)."""
+    C, F = 6, 12
+    ctx = _ctx(n_channels=C)
+    concat, _ = MockEmbedder(feature_dim=F, channel_aggregation="concat").embed_windows(ctx)
+    mean, _ = MockEmbedder(feature_dim=F, channel_aggregation="mean").embed_windows(ctx)
+    assert concat.shape == mean.shape == (len(ctx), F)
+    assert np.allclose(concat, mean)
+
+
+def test_mock_empty_context_and_describe():
+    for layout in ("multivariate", "univariate"):
+        m = MockEmbedder(feature_dim=10, layout=layout)
+        emb, ls = m.embed_windows([])
+        assert emb.shape == (0, 10) and ls.shape == (0, 0, 2)
+        d = m.describe()
+        assert set(d) >= {"embedder", "feature_dim", "seed", "layout", "channel_aggregation"}
+        assert d["layout"] == layout
+
+
+def test_mock_rejects_bad_params():
+    with pytest.raises(ValueError):
+        MockEmbedder(layout="bogus")
+    with pytest.raises(ValueError):
+        MockEmbedder(channel_aggregation="bogus")
