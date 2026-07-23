@@ -1,0 +1,5 @@
+# TimesFM 2.5 (weights: google/timesfm-2.5-200m-pytorch).
+# Imports cleanly on Colab and does not disturb torch. The earlier failure was only a
+# wrong HF id ("google/timesfm-2.5" 404'd) -- fixed in src/models/__init__.py. The 2.x
+# PyPI release exposes TimesFM_2p5_200M_torch (verified).
+timesfm>=2.0

@@ -1,4 +1,4 @@
-"""TimesFM 2.5 embedder (google/timesfm-2.5): a univariate decoder-only TSFM.
+"""TimesFM 2.5 embedder (google/timesfm-2.5-200m-pytorch): a univariate decoder-only TSFM.
 
 Channel-independent like MOMENT (RESEARCH_PLAN §6): each 1-D channel is embedded on
 its own, the per-channel patch hidden states are stacked into the canonical
@@ -37,10 +37,9 @@ class TimesFMEmbedder(TSFMEmbedderBase):
         import torch
         import timesfm  # lazy heavy import (GPU-only)
 
-        # NOTE (verified against the timesfm source): the released weights live at
-        # DEFAULT_REPO_ID "google/timesfm-2.5-200m-pytorch"; if the registry model_name
-        # is not a valid HF id the spike swaps it here. torch_compile=False keeps the
-        # eager module.forward we read hidden states from.
+        # model_name is the real HF weights id "google/timesfm-2.5-200m-pytorch" (the
+        # registry key; the earlier "google/timesfm-2.5" 404'd on Colab). torch_compile=
+        # False keeps the eager module.forward we read hidden states from.
         model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
             self.model_name, torch_compile=False)
         self._torch = torch

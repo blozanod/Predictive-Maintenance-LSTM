@@ -1,0 +1,8 @@
+# MOMENT (AutonLab/MOMENT-1-large) via momentfm.
+# INSTALL WITH --no-deps (the verify notebook does this): momentfm hard-pins
+# numpy==1.25.2 (no py3.12 wheel -> source build fails) and huggingface-hub==0.24.0,
+# both of which break a modern Colab runtime. momentfm itself is a pure-python wheel and
+# runs against the runtime's existing numpy/torch/transformers. If momentfm errors
+# against the modern transformers T5 API, add `transformers>=4.33,<4.41` below and drop
+# --no-deps for that line (install it separately).
+momentfm>=0.1.4

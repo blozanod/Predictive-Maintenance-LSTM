@@ -1,0 +1,5 @@
+# Chronos-2 (amazon/chronos-2) — the anchor multivariate-native TSFM.
+# Installs cleanly on a FRESH Colab runtime (torch 2.10 + transformers >=4.57 default);
+# do NOT run in a runtime a different backbone has already downgraded torch/torchvision in.
+chronos-forecasting>=2.0.0
+safetensors>=0.4
