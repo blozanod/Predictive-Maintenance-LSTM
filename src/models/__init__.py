@@ -27,7 +27,7 @@ from .ttm import TTMEmbedder
 # base (models/base.py); only their backbone load/call differ (CHANGES.md §34).
 EMBEDDERS = {
     "amazon/chronos-2": ChronosEmbedder,
-    "Salesforce/moirai-2": MoiraiEmbedder,
+    "Salesforce/moirai-2.0-R-small": MoiraiEmbedder,   # real HF weights id (verified on Colab)
     "AutonLab/MOMENT-1-large": MomentEmbedder,
     "google/timesfm-2.5-200m-pytorch": TimesFMEmbedder,   # real HF weights id (verified on Colab)
     "ibm-granite/granite-timeseries-ttm-r2": TTMEmbedder,

@@ -1,4 +1,4 @@
-"""Moirai-2 embedder (Salesforce/moirai-2): a multivariate-native "any-variate" TSFM.
+"""Moirai-2 embedder (Salesforce/moirai-2.0-R-small): a multivariate-native "any-variate" TSFM.
 
 Moirai feeds all channels JOINTLY, flattening the variates with variate-ids (uni2ts
 native), so it is the second member of the multivariate-native family alongside
