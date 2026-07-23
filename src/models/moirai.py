@@ -48,16 +48,46 @@ class MoiraiEmbedder(TSFMEmbedderBase):
         return self._pipeline
 
     def _encode_batch(self, batch):  # pragma: no cover -- GPU-only backbone call
+        # Moirai2Module exposes NO .encode(): its forward() consumes PACKED inputs
+        # (target, observed_mask, sample_id, time_id, variate_id, prediction_mask) and
+        # the representations are internal. We reproduce the encoder path exactly as
+        # module.forward does -- scaler -> in_proj -> encoder -> reprs -- per variate
+        # (single-variate packing is the documented fallback that yields the canonical
+        # (n_variates, patches, d_model); RESEARCH_PLAN §11). Verified against uni2ts's
+        # moirai2/module.py; weight-level shapes are confirmed by the Colab spike.
+        from uni2ts.common.torch_util import packed_causal_attention_mask
         module = self._load_pipeline()
         torch = self._torch
+        dev = self._device_resolved
+        patch = int(module.patch_size)
         canonical = []
         for w in batch:
             w = np.asarray(w, np.float32)                 # (L, C)
-            series = torch.as_tensor(w, dtype=torch.float32,
-                                     device=self._device_resolved).transpose(0, 1)[None]
-            with torch.inference_mode():
-                hidden = module.encode(series)            # (1, n_variates, patches, d_model)
-            arr = np.asarray(hidden, np.float32)
-            canonical.append(arr.reshape(arr.shape[-3], arr.shape[-2], arr.shape[-1]))
+            n = w.shape[0]
+            pad = (-n) % patch
+            npatch = (n + pad) // patch
+            per_variate = []
+            for c in range(w.shape[1]):
+                s = np.concatenate([np.zeros(pad, np.float32), w[:, c]])
+                target = torch.as_tensor(s.reshape(npatch, patch), device=dev)[None]
+                observed = torch.ones(1, npatch, patch, dtype=torch.bool, device=dev)
+                if pad:
+                    observed[0, 0, :pad] = False
+                sample_id = torch.ones(1, npatch, dtype=torch.long, device=dev)
+                time_id = torch.arange(npatch, device=dev)[None]
+                variate_id = torch.zeros(1, npatch, dtype=torch.long, device=dev)
+                pred_mask = torch.zeros(1, npatch, dtype=torch.bool, device=dev)
+                with torch.inference_mode():
+                    loc, scale = module.scaler(
+                        target, observed * ~pred_mask.unsqueeze(-1), sample_id, variate_id)
+                    tokens = torch.cat([(target - loc) / scale,
+                                        observed.to(torch.float32)], dim=-1)
+                    reprs = module.in_proj(tokens)
+                    reprs = module.encoder(
+                        reprs, packed_causal_attention_mask(sample_id, time_id),
+                        time_id=time_id, var_id=variate_id)
+                per_variate.append(np.asarray(reprs[0].detach().to("cpu").float().numpy(),
+                                              np.float32))   # (npatch, d_model)
+            canonical.append(np.stack(per_variate, axis=0))  # (C, npatch, d_model)
         loc_scale = self.loc_scale_from_contexts(batch)
         return canonical, loc_scale

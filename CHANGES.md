@@ -808,6 +808,48 @@ result changes; the FD001 window/embedding keys stay byte-identical
   pyarrow) still arrive with their own milestones — `package_versions()` reports them
   `not-installed` until then, by design (§32).
 
+## 41. Multi-seed zero-shot + backbone `_encode_batch` verification (real library APIs)
+Two follow-ups to the M0/M1 review.
+
+- **Zero-shot now runs over multiple seeds (`src/zeroshot.py`).** The arm is
+  deterministic given its calibration set, so a single run is one lucky/unlucky draw of
+  observed failures. `run_zeroshot` now sweeps `config.sweep_seeds` (default 5); each seed
+  BOOTSTRAPS the calibration units (resample with replacement) before fitting the
+  unsupervised health-index transform, the failure threshold, and both floors — so the
+  reported seed-mean averages over draws and the win-rule's paired-seed test is no longer
+  vacuous. `ZEROSHOT_KEYS` gained `seed`; rows stay `n_units=0` (the 0-target-failures
+  endpoint); the health index still uses no RUL labels. Restartable per `(model, seed)`.
+
+- **The four v2 backbone bodies were verified against each library's real source and
+  corrected — all four had non-working API calls (`src/models/*.py`).** These
+  `_encode_batch`/`_load_pipeline` methods are the sole `# pragma: no cover` boundary; CPU
+  tests mock them, and the CI container has no GPU and no HuggingFace egress, so they were
+  written from assumed APIs and never executed. Verifying each against the installed
+  library (TTM, TimesFM signature-checked locally) and its GitHub source (MOMENT, Moirai):
+  - **MOMENT** — `.embeddings` and `model_kwargs={"task_name":"embedding"}` were right, but
+    MOMENT-1 hard-requires a FIXED `config.seq_len` (512) input with no auto-pad. Now pads
+    each channel's most-recent cycles into a 512 buffer + `input_mask` and calls
+    `embed(reduction="mean")` (verified against momentfm 0.1.4).
+  - **Moirai-2** — `Moirai2Module` has **no `.encode()`**; its `forward()` consumes packed
+    inputs and the reprs are internal. Rewritten to reproduce the encoder path
+    (`scaler → in_proj → encoder`) per variate, the documented encoder-hidden-states
+    fallback (RESEARCH_PLAN §11). Also: the `moirai2` submodule + `packed_causal_attention_mask`
+    are NOT in any PyPI `uni2ts` release (only GitHub main) → `requirements.txt` now installs
+    `uni2ts` from git.
+  - **TimesFM 2.5** — `TimesFM_2p5_200M_torch` has **no `.embed()`**; per-patch hidden states
+    are `output_embeddings` (index 1) of the underlying module's `forward(inputs, masks)`.
+    Rewritten to patch (p=32) + mask + RevIN-normalize + read `output_embeddings`
+    (signature-verified: `module.p`, the 4-tuple return, `torch_compile` kwarg).
+  - **TTM** — `get_model` **requires `prediction_length`** and rejects sub-512 contexts
+    without `force_return="zeropad"` (the old call passed neither → immediate raise). Fixed;
+    inputs are zero-padded to `model.config.context_length`; `backbone_hidden_state`
+    `(batch, n_variates, patches, d_model)` was the correct output field (signature-verified).
+  - **`scripts/verify_backbones_colab.py`** (new) is the weight-level spike the container
+    can't run: on a Colab GPU it loads each real model and runs `embed_windows` on synthetic
+    contexts, asserting shape/finiteness/non-degeneracy and exiting non-zero on any failure.
+    Final validation of these bodies (and the exact HF repo ids) is that spike, per
+    RESEARCH_PLAN §9/§11 — a backbone that still fails is reported, not forced.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from

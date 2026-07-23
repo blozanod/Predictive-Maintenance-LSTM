@@ -85,11 +85,27 @@ def test_run_zeroshot_writes_rows_and_floors(tmp_path):
     models = {r["model"] for r in rows}
     assert "chronos-2_zeroshot" in models
     assert {"predict_mean", "cycle_reg"} <= models        # scored vs the floors
+    # one row per (model, seed): 3 models x the default 5 seeds
+    assert {int(r["seed"]) for r in rows} == {0, 1, 2, 3, 4}
+    assert len(rows) == 3 * 5
     for r in rows:
         assert int(r["n_units"]) == 0                     # the 0-failures endpoint
         assert np.isfinite(float(r["rmse_clipped"]))
         assert np.isfinite(float(r["nasa_clipped"]))
         assert 0.0 <= float(r["mae_clipped"])
+
+
+def test_run_zeroshot_seeds_vary_and_average(tmp_path):
+    """The bootstrap makes the arm genuinely stochastic across seeds, so the seed-mean
+    is a real average of distinct draws (not a repeated single number)."""
+    cfg = _cfg(tmp_path)
+    write_synthetic_cmapss(Path(cfg.data_dir), n_train_units=12, n_test_units=6)
+    out = Z.run_zeroshot(cfg, seeds=[0, 1, 2],
+                         forecaster_factory=lambda c: _RampForecaster(slope=0.2))
+    rows = [r for r in csv.DictReader(open(out)) if r["model"] == "chronos-2_zeroshot"]
+    assert {int(r["seed"]) for r in rows} == {0, 1, 2}
+    rmses = {float(r["rmse_clipped"]) for r in rows}
+    assert len(rmses) > 1                                 # seeds genuinely differ
 
 
 def test_run_zeroshot_restartable(tmp_path):
@@ -130,8 +146,8 @@ def test_run_zeroshot_predictions_within_cap(tmp_path):
     cfg = _cfg(tmp_path)
     write_synthetic_cmapss(Path(cfg.data_dir), n_train_units=8, n_test_units=6)
     # a forecaster that never crosses -> every unit's RUL is capped at the horizon
-    out = Z.run_zeroshot(cfg, forecaster_factory=lambda c: _RampForecaster(slope=-1.0),
-                         horizon=25)
+    out = Z.run_zeroshot(cfg, seeds=[0], horizon=25,
+                         forecaster_factory=lambda c: _RampForecaster(slope=-1.0))
     z_rows = [r for r in csv.DictReader(open(out)) if r["model"] == "chronos-2_zeroshot"]
     assert len(z_rows) == 1
     # predictions were clipped into [0, max_rul]; metrics stay finite

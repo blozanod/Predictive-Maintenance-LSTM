@@ -39,7 +39,12 @@ class TTMEmbedder(TSFMEmbedderBase):
         from tsfm_public import get_model  # lazy heavy import (GPU-only; granite-tsfm)
 
         device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
-        model = get_model(self.model_name, context_length=self.context_length)
+        # get_model (verified against granite-tsfm) REQUIRES prediction_length and, for a
+        # requested context below the shortest pretrained TTM (512 for r2), raises unless
+        # force_return="zeropad" -- which returns a >=512-context model we zero-pad into.
+        # We only need the backbone hidden states, so prediction_length is a placeholder.
+        model = get_model(self.model_name, context_length=self.context_length,
+                          prediction_length=1, force_return="zeropad")
         model = model.to(device).eval()
         self._torch = torch
         self._device_resolved = device
@@ -47,19 +52,25 @@ class TTMEmbedder(TSFMEmbedderBase):
         return self._pipeline
 
     def _encode_batch(self, batch):  # pragma: no cover -- GPU-only backbone call
+        # TTM's patching is fixed to model.config.context_length; place each window's
+        # most-recent `take` cycles at the END of a context-length buffer (front zero-pad,
+        # the get_model "zeropad" contract). forward(past_values=...) returns
+        # backbone_hidden_state (batch, n_variates, num_patches, d_model) -- verified
+        # against granite-tsfm's TinyTimeMixerForPredictionOutput.
         model = self._load_pipeline()
         torch = self._torch
+        ctx = int(model.config.context_length)
         canonical = []
         for w in batch:
             w = np.asarray(w, np.float32)                 # (L, C)
-            series = torch.as_tensor(w, dtype=torch.float32,
-                                     device=self._device_resolved)[None]  # (1, L, C)
+            take = min(w.shape[0], ctx)
+            buf = np.zeros((ctx, w.shape[1]), np.float32)
+            buf[-take:] = w[-take:]                        # right-aligned; front zero-pad
+            x = torch.as_tensor(buf, device=self._device_resolved)[None]  # (1, ctx, C)
             with torch.inference_mode():
-                out = model(past_values=series)
-            hidden = out.backbone_hidden_state if hasattr(out, "backbone_hidden_state") \
-                else out.last_hidden_state
-            # (1, n_variates, patches, d_model) -> (n_variates, patches, d_model)
-            arr = np.asarray(hidden, np.float32)
+                out = model(past_values=x)
+            hidden = out.backbone_hidden_state             # (1, n_variates, patches, d_model)
+            arr = np.asarray(hidden.detach().to("cpu").float().numpy(), np.float32)
             canonical.append(arr.reshape(arr.shape[-3], arr.shape[-2], arr.shape[-1]))
         loc_scale = self.loc_scale_from_contexts(batch)
         return canonical, loc_scale
