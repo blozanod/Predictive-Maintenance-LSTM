@@ -67,8 +67,15 @@ class TTMEmbedder(TSFMEmbedderBase):
             buf = np.zeros((ctx, w.shape[1]), np.float32)
             buf[-take:] = w[-take:]                        # right-aligned; front zero-pad
             x = torch.as_tensor(buf, device=self._device_resolved)[None]  # (1, ctx, C)
+            # The r2.1 model card serves frequency-prefix-tuned ("-ft-") revisions whose
+            # forward REQUIRES a freq_token (batch,) or raises "Expecting freq_token".
+            # DECISION (uncited): freq index 0 (base/unknown frequency) -- we extract
+            # representations, not forecast a specific-cadence series; harmless (unused)
+            # for non-ft variants. ft models prepend a freq patch -> patches+1, which the
+            # shared pooling absorbs.
+            freq_token = torch.zeros(1, dtype=torch.long, device=self._device_resolved)
             with torch.inference_mode():
-                out = model(past_values=x)
+                out = model(past_values=x, freq_token=freq_token)
             hidden = out.backbone_hidden_state             # (1, n_variates, patches, d_model)
             arr = np.asarray(hidden.detach().to("cpu").float().numpy(), np.float32)
             canonical.append(arr.reshape(arr.shape[-3], arr.shape[-2], arr.shape[-1]))

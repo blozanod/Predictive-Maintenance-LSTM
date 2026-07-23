@@ -904,6 +904,20 @@ to end for three backbones. Two failed and are fixed here:
   torchvision, which is why they passed.
 Both are one-line-ish, ship in the same PR; re-verify TTM and Moirai on a fresh runtime.
 
+## 44. Colab GPU verification round 2 — Moirai passes (4/5); TTM freq_token
+Re-run of the §43 fixes on fresh runtimes:
+- **Moirai-2 PASSES** with the corrected id — `emb=(4, 3072)` (8·384=3072 for the small
+  model), finite, non-degenerate. This is the first real-weight execution of the
+  source-verified `_encode_batch` encoder-packing path (scaler → in_proj → encoder per
+  variate); it produces the canonical `(n_variates, patches, d_model)` correctly. **4/5**.
+- **TTM — the torch/torchvision pin worked** (imports + loads cleanly now, revision
+  `180-60-ft-l1-r2.1`), exposing the next layer: that r2.1 revision is
+  frequency-prefix-tuned, so `forward` REQUIRES a `freq_token` (`Exception: Expecting
+  freq_token in forward`). `models/ttm.py` now passes `freq_token = zeros(1)` (base/unknown
+  frequency — we extract representations, not forecast a specific cadence; unused by
+  non-ft variants; ft variants prepend one freq patch → patches+1, absorbed by the shared
+  pooling). `# DECISION (uncited)`. Re-verify TTM on a fresh runtime.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
