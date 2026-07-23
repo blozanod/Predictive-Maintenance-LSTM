@@ -204,3 +204,36 @@ def test_optional_library_baselines(tmp_path, name):
     pred = bl.predict(te_w)
     assert pred.shape == (len(te_w),)
     assert pred.min() >= 0 and pred.max() <= cfg.max_rul
+
+
+def test_catch22_gbm_baseline(tmp_path):
+    """catch22_gbm reuses pycatch22 (features) + lightgbm (regressor); skipped when
+    either is not installed. Mirrors test_optional_library_baselines; exercises the
+    fit/predict interface and the 22-per-channel feature width."""
+    pytest.importorskip("pycatch22")
+    pytest.importorskip("lightgbm")
+    cfg = _smoke_config(tmp_path)
+    write_synthetic_cmapss(Path(cfg.data_dir), n_train_units=6, n_test_units=4)
+    df_train, df_test, rul = D.load_cmapss(cfg)
+    df_train = D.add_train_rul(df_train, cfg)
+    df_test = D.add_test_rul(df_test, rul, cfg)
+    tr_w, tr_y, _ = D.make_windows(df_train, cfg.sensor_columns, cfg.window_size)
+    va_w, va_y, _ = D.make_windows(df_train, cfg.sensor_columns, cfg.window_size)
+    te_w, te_y, _ = D.make_test_last_windows(df_test, cfg.sensor_columns, cfg.window_size)
+
+    from src import baselines as B
+    # 22 catch22 features per channel, concatenated across the C channels.
+    feats = B.catch22_features(tr_w)
+    assert feats.shape == (len(tr_w), 22 * len(cfg.sensor_columns))
+
+    bl = B.make_baseline("catch22_gbm", cfg, seed=0)
+    assert bl.name == "catch22_gbm"
+    bl.fit(tr_w, tr_y)                        # no-val branch (mirrors the gbm test)
+    pred = bl.predict(te_w)
+    assert pred.shape == (len(te_w),)
+    assert pred.min() >= 0 and pred.max() <= cfg.max_rul
+
+    # Also exercise the val/eval_set branch (the campaign passes a val split).
+    bl2 = B.make_baseline("catch22_gbm", cfg, seed=0).fit(tr_w, tr_y, va_w, va_y)
+    pred2 = bl2.predict(te_w)
+    assert pred2.min() >= 0 and pred2.max() <= cfg.max_rul
