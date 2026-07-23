@@ -994,6 +994,44 @@ No recorded result, cache key, or CSV schema changes; the FD001 keys stay byte-i
   core run (added later as optional Stage-A cells) so nothing blocks the core campaign. No
   result numbers or claims are written anywhere — no runs happen here (Task 2.5).
 
+## 46. Batched embedding forward passes (MOMENT / TimesFM / Moirai / TTM) — Stage-A throughput
+The first real Stage-A run on Colab (an L4) exposed a throughput bug: the four v2 backbones
+embedded **one series at a time (batch size 1)** inside a nested per-(window × channel)
+Python loop, so a full C-MAPSS pass was ~250k serialized forward passes and the GPU sat
+~95% idle (MOMENT 1.6 GB / Moirai 0.3 GB / TimesFM 1.1 GB of 22.5 GB). Chronos-2 was fine —
+it is multivariate-native and already batched whole windows via `Chronos2Pipeline.embed()`.
+The verify spikes (§43/§44) only ran 4 windows, so the inefficiency was invisible.
+
+**Fix — batch the forward passes; identical math, no cache/result change.** New shared
+helpers on `TSFMEmbedderBase` (`src/models/base.py`, CPU-covered):
+- `_grouped_forward(items, shape_key, forward_fn)` — groups the prepared per-series inputs
+  by tensor shape (`shape_key`), sub-chunks each group to `embed_batch_size` (so GPU memory
+  scales with the batch, not the dataset), runs **one** backbone call per chunk, and
+  scatters outputs back to the original order. Because every item in a chunk is the same
+  shape, the batched forward is exactly the batch-1 result stacked — no padding, no changed
+  arithmetic.
+- `_regroup_channels(flat, channels_per_window)` — restacks the window-major per-channel
+  outputs into the per-window canonical `(n_variates, patches, d_model)` tensors.
+
+Each `_encode_batch` (still the sole `# pragma: no cover` boundary) now builds its
+per-series inputs, calls `_grouped_forward` with a batched `forward_fn`, and regroups:
+MOMENT stacks every `(window, channel)` series (all share `seq_len=512`) into one
+`embed()`; TimesFM/Moirai group series by patch count (few distinct values → a handful of
+calls) — each Moirai element stays an independent single-variate sequence, so the packed
+attention is unchanged; TTM (multivariate-native) stacks whole windows (uniform `(ctx, C)`)
+into one forward. `embed_batch_size` now meaningfully bounds GPU memory (lower it if a
+large model OOMs).
+
+**Guardrails.** `tests/test_models.py` covers `_grouped_forward` (order preservation,
+shape-homogeneous batching, `batch_size` sub-chunking) and `_regroup_channels`, plus an
+end-to-end `_BatchedFakeEmbedder` asserting the embeddings are **byte-identical across
+`embed_batch_size` ∈ {1, 2, 4, 100}** — the CPU guarantee behind the speedup. On real
+weights, `scripts/verify_backbones_colab.py` now embeds 12 mixed-length windows and adds a
+**batch-invariance check** (default batched path vs `batch_size=1`), so a re-run of the
+`notebooks/verify/*.ipynb` confirms the batched shapes/scatter on GPU before a full campaign.
+The pooled embeddings are unchanged, so **no cache key, CSV, or recorded result changes**
+(FD001 stays `windows_FD001_1da313c871251cec`); `pytest -q` green.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from

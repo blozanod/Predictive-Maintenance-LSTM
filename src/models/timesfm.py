@@ -52,16 +52,21 @@ class TimesFMEmbedder(TSFMEmbedderBase):
         # states are output_embeddings (index 1) of the underlying module's forward
         # (verified against timesfm_2p5_torch). We patch each channel to the input patch
         # length p (front-pad + mask), instance-normalize (RevIN, the model's own
-        # convention), and read output_embeddings (1, num_patches, model_dims).
+        # convention), and read output_embeddings (b, num_patches, model_dims).
         # DECISION (uncited): per-series (not running-stat) normalization for embedding.
+        # Series that share a patch count (few distinct values: ceil(L/p)) stack into ONE
+        # forward via _grouped_forward instead of one call per (window, channel) -- the
+        # batch-1 loop left the GPU ~95% idle (CHANGES.md §46).
         model = self._load_pipeline()
         torch = self._torch
-        core = model.model.to(self._device_resolved).eval()   # the nn.Module
+        dev = self._device_resolved
+        core = model.model.to(dev).eval()                     # the nn.Module
         p = int(core.p)                                        # input patch length (32)
-        canonical = []
+
+        items, chans = [], []
         for w in batch:
             w = np.asarray(w, np.float32)                     # (L, C)
-            per_channel = []
+            chans.append(w.shape[1])
             for c in range(w.shape[1]):
                 s = w[:, c]
                 pad = (-len(s)) % p
@@ -69,14 +74,15 @@ class TimesFMEmbedder(TSFMEmbedderBase):
                 is_pad = np.concatenate([np.ones(pad, bool), np.zeros(len(s), bool)])
                 mu = float(s.mean()); sigma = float(s.std()) or 1.0
                 normed = np.where(is_pad, 0.0, (padded - mu) / sigma).astype(np.float32)
-                x = torch.as_tensor(normed.reshape(-1, p),
-                                    device=self._device_resolved)[None]     # (1, np, p)
-                m = torch.as_tensor(is_pad.reshape(-1, p),
-                                    device=self._device_resolved)[None]     # (1, np, p)
-                with torch.inference_mode():
-                    (_, output_emb, _, _), _ = core(x, m)     # output_emb (1, np, d_model)
-                per_channel.append(np.asarray(output_emb[0].detach().to("cpu")
-                                              .float().numpy(), np.float32))
-            canonical.append(np.stack(per_channel, axis=0))   # (C, num_patches, d_model)
-        loc_scale = self.loc_scale_from_contexts(batch)
-        return canonical, loc_scale
+                items.append((normed.reshape(-1, p), is_pad.reshape(-1, p)))  # (np,p),(np,p)
+
+        def _fwd(group):
+            xb = torch.as_tensor(np.stack([g[0] for g in group]), device=dev)  # (b, np, p)
+            mb = torch.as_tensor(np.stack([g[1] for g in group]), device=dev)  # (b, np, p)
+            with torch.inference_mode():
+                (_, output_emb, _, _), _ = core(xb, mb)       # (b, np, d_model)
+            arr = np.asarray(output_emb.detach().to("cpu").float().numpy(), np.float32)
+            return [arr[k] for k in range(arr.shape[0])]      # each (np, d_model)
+
+        flat = self._grouped_forward(items, lambda it: it[0].shape[0], _fwd)  # key=num_patches
+        return self._regroup_channels(flat, chans), self.loc_scale_from_contexts(batch)
