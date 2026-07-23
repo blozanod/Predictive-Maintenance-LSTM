@@ -43,12 +43,15 @@ PRIMARY_METRIC = "nasa_clipped"
 SECONDARY_METRIC = "rmse_clipped"
 
 # The from-scratch / cheap-feature / floor comparators (RESEARCH_PLAN §6). Any model
-# NOT ending in ``_mlp`` is a baseline; the TSFM heads are ``<tag>_mlp``. This set is
-# the documented roster so a typo'd model name is never silently treated as a TSFM.
+# NOT ending in a TSFM suffix is a baseline; the TSFM rows under test are ``<tag>_mlp``
+# (a trained head) or ``<tag>_zeroshot`` (the RQ-Z no-training arm, src/zeroshot.py).
+# This set is the documented roster so a typo'd model name is never silently a TSFM.
 BASELINE_MODELS = frozenset({
     "predict_mean", "gbm", "minirocket", "cnn", "lstm",
     "cycle_reg", "gbm_age", "catch22_gbm",
 })
+# Suffixes that mark a TSFM row under test (as opposed to a baseline comparator).
+TSFM_SUFFIXES = ("_mlp", "_zeroshot")
 # The trivial FLOORS (RESEARCH_PLAN §6: "+ floors: predict-mean, cycle-count linear
 # regression"). They are the usability guard, NOT competitors -- a TSFM that beats
 # every real baseline but not the trivial floor is a hollow win.
@@ -61,8 +64,9 @@ FLOOR_MODEL = "predict_mean"
 
 
 def is_tsfm_model(model: str) -> bool:
-    """A TSFM head row (``<model-tag>_mlp``) as opposed to a baseline comparator."""
-    return str(model).endswith("_mlp")
+    """A TSFM row under test -- a trained head (``<tag>_mlp``) or the zero-shot arm
+    (``<tag>_zeroshot``, RQ-Z) -- as opposed to a baseline comparator."""
+    return str(model).endswith(TSFM_SUFFIXES)
 
 
 def is_competitor_baseline(model: str) -> bool:
@@ -88,19 +92,17 @@ def _grouped_seed_values(rows: Iterable[dict], metric: str,
     return out
 
 
-def strongest_baseline_per_cell(
-    rows: Iterable[dict],
-    metric: str = PRIMARY_METRIC,
-    cell_fields: tuple[str, ...] = ("dataset", "n_units"),
+def _strongest_by_predicate(
+    grouped: dict[tuple, dict[str, dict[int, float]]], comparator,
 ) -> dict[tuple, tuple[str, float]]:
-    """``{cell: (best_baseline_name, best_seed_mean)}`` -- the toughest baseline bar in
-    each cell (the lowest baseline seed-mean; lower is better)."""
-    grouped = _grouped_seed_values(rows, metric, cell_fields)
+    """``{cell: (best_model, best_seed_mean)}`` over the models satisfying
+    ``comparator`` (the lowest seed-mean; lower is better). Cells with no such model
+    are omitted -- there is no bar to clear."""
     out: dict[tuple, tuple[str, float]] = {}
     for cell, by_model in grouped.items():
         best_model, best_mean = None, np.inf
         for model, seedvals in by_model.items():
-            if not is_competitor_baseline(model):
+            if not comparator(model):
                 continue
             mean = _seed_mean(seedvals)
             if mean < best_mean:
@@ -108,6 +110,18 @@ def strongest_baseline_per_cell(
         if best_model is not None:
             out[cell] = (best_model, best_mean)
     return out
+
+
+def strongest_baseline_per_cell(
+    rows: Iterable[dict],
+    metric: str = PRIMARY_METRIC,
+    cell_fields: tuple[str, ...] = ("dataset", "n_units"),
+) -> dict[tuple, tuple[str, float]]:
+    """``{cell: (best_baseline_name, best_seed_mean)}`` -- the toughest COMPETITOR
+    baseline bar in each cell (the lowest baseline seed-mean; lower is better; floors
+    excluded)."""
+    return _strongest_by_predicate(
+        _grouped_seed_values(rows, metric, cell_fields), is_competitor_baseline)
 
 
 def _classify(margin: float, p: float, config: Config) -> str:
@@ -127,17 +141,26 @@ def win_verdict(
     config: Config,
     metric: str = PRIMARY_METRIC,
     cell_fields: tuple[str, ...] = ("dataset", "n_units"),
+    compare_to_floors: bool = False,
 ) -> dict[tuple, dict]:
-    """Per (cell, TSFM-model) verdict against the strongest baseline in that cell.
+    """Per (cell, TSFM-model) verdict against the comparison bar in that cell.
 
     Returns ``{cell + (model,): verdict_dict}`` where ``verdict_dict`` carries the
     verdict (win/tie/loss/hollow), the signed ``margin``, the paired-seed ``p``, both
     seed-means, the chosen baseline, the floor, and the paired-seed count. ``rows`` is
-    the combined TSFM + baseline rows (a cell with no baseline is skipped -- there is
-    no bar to clear)."""
+    the combined TSFM + baseline rows (a cell with no comparator is skipped -- there is
+    no bar to clear).
+
+    The comparison bar is the strongest COMPETITOR baseline by default. Set
+    ``compare_to_floors=True`` for the **zero-shot arm** (RQ-Z), whose only comparators
+    are the ``predict_mean`` / ``cycle_reg`` floors (RESEARCH_PLAN §8, IMPLEMENTATION_PLAN
+    §4.5): the best floor becomes the bar and the hollow guard is moot (beating a floor
+    is the whole point), so it is skipped."""
     rows = list(rows)
     grouped = _grouped_seed_values(rows, metric, cell_fields)
-    strongest = strongest_baseline_per_cell(rows, metric, cell_fields)
+    comparator = ((lambda m: m in FLOOR_MODELS) if compare_to_floors
+                  else is_competitor_baseline)
+    strongest = _strongest_by_predicate(grouped, comparator)
     out: dict[tuple, dict] = {}
     for cell, by_model in grouped.items():
         if cell not in strongest:
@@ -155,8 +178,10 @@ def win_verdict(
                                  [base_seedvals[s] for s in shared])
             verdict = _classify(margin, p, config)
             # Absolute-floor guard: a "win" where the TSFM is no better than the
-            # trivial predict-mean floor is hollow (everything fails there).
-            if verdict == "win" and floor is not None and tsfm_mean >= floor - config.win_margin:
+            # trivial predict-mean floor is hollow (everything fails there). Moot when
+            # the floors ARE the bar (compare_to_floors), so skipped there.
+            if (verdict == "win" and not compare_to_floors and floor is not None
+                    and tsfm_mean >= floor - config.win_margin):
                 verdict = "hollow"
             out[cell + (model,)] = {
                 "verdict": verdict, "margin": float(margin), "p": float(p),
@@ -190,15 +215,17 @@ def success_map(
     metric: str = PRIMARY_METRIC,
     cell_fields: tuple[str, ...] = ("dataset", "n_units"),
     secondary_metric: str = SECONDARY_METRIC,
+    compare_to_floors: bool = False,
 ) -> list[dict]:
     """The headline deliverable object: one row per (cell, TSFM model) with the
     verdict + margin + p + the seed-means, ordered deterministically. ``results_glob``
     may be a glob, a directory of per-combo CSVs, or one CSV. ``config`` supplies the
-    win margin/alpha (defaults to ``Config()`` if omitted). ``plots.plot_success_map``
-    renders the returned table."""
+    win margin/alpha (defaults to ``Config()`` if omitted). ``compare_to_floors=True``
+    scores the zero-shot arm against the floors (see ``win_verdict``).
+    ``plots.plot_success_map`` renders the returned table."""
     config = config if config is not None else Config()
     rows = _load_glob(results_glob)
-    verdicts = win_verdict(rows, config, metric, cell_fields)
+    verdicts = win_verdict(rows, config, metric, cell_fields, compare_to_floors)
     # RMSE-alongside: the secondary metric's TSFM seed-mean per (cell, model).
     rmse_grouped = _grouped_seed_values(rows, secondary_metric, cell_fields)
     table: list[dict] = []

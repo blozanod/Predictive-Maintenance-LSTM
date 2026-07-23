@@ -53,7 +53,9 @@ class Embedder(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Pooling (numpy reference; kept for tests + CPU paths)
+# Pooling -- the single reference used by EVERY backbone (via models/base.py, and
+# ChronosEmbedder now shares it too, CHANGES.md §40; there is no separate on-device
+# twin to keep in sync).
 #
 # Pooling is TWO stages so it is common across every backbone (IMPLEMENTATION_PLAN
 # §4.1, the semantic-not-index-based pooling contract):
@@ -123,29 +125,6 @@ def pool_window_embedding(emb: np.ndarray, strategy: str,
     (``channel_aggregation``). See the module header for the layout contract."""
     per_variate = pool_patches(emb, strategy, n_special_tokens)
     return aggregate_variates(per_variate, channel_aggregation).astype(np.float32)
-
-
-def _pool_one_torch(emb_t, strategy: str, channel_aggregation: str = "concat",
-                    n_special_tokens: int = 2):
-    """On-device twin of ``pool_window_embedding`` for one window tensor
-    ``(n_variates, P, d_model)`` -> 1D tensor, so only the small pooled vector is
-    transferred to host (Task 2 vectorized pooling)."""
-    n_content = _content_count(emb_t.shape[1], n_special_tokens)
-    if strategy == "forecast_token":
-        per_variate = emb_t[:, -1, :]
-    elif strategy == "last_content":
-        per_variate = emb_t[:, n_content - 1, :]
-    elif strategy == "mean":
-        per_variate = emb_t[:, :n_content, :].mean(dim=1)
-    elif strategy == "flatten":
-        per_variate = emb_t[:, :n_content, :].reshape(emb_t.shape[0], -1)
-    else:
-        raise ValueError(f"unknown pooling strategy: {strategy!r}")
-    if channel_aggregation == "concat":
-        return per_variate.reshape(-1)
-    if channel_aggregation == "mean":
-        return per_variate.mean(dim=0)
-    raise ValueError(f"unknown channel_aggregation: {channel_aggregation!r}")
 
 
 # ---------------------------------------------------------------------------

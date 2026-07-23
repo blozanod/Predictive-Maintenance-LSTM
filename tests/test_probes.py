@@ -82,6 +82,24 @@ def test_noise_rekeys_windows_only_when_set():
     assert Config(dataset="FD001", noise_injection={}).window_cache_key() == base.window_cache_key()
 
 
+def test_noise_seed_is_captured_in_the_cache_key():
+    """The perturbation seed defaults to config.seed; a config.seed change with the SAME
+    spec must re-key (else two runs silently share a differently-perturbed cache, §40)."""
+    spec = {"kind": "gaussian", "snr_db": 20}
+    a = Config(dataset="FD001", seed=42, noise_injection=dict(spec))
+    b = Config(dataset="FD001", seed=7, noise_injection=dict(spec))
+    assert a.effective_noise_seed() == 42 and b.effective_noise_seed() == 7
+    assert a.window_cache_key() != b.window_cache_key()          # was equal before §40
+    assert a.embedding_cache_key() != b.embedding_cache_key()
+    # an explicit spec seed pins it regardless of config.seed (reproducible across runs)
+    p = Config(dataset="FD001", seed=42, noise_injection={**spec, "seed": 3})
+    q = Config(dataset="FD001", seed=99, noise_injection={**spec, "seed": 3})
+    assert p.window_cache_key() == q.window_cache_key()
+    # the unperturbed FD001 key is untouched (config.seed still absent from it)
+    assert (Config(dataset="FD001", seed=42).window_cache_key()
+            == Config(dataset="FD001", seed=7).window_cache_key())
+
+
 def test_load_prepared_applies_noise(tmp_path):
     clean = Config(dataset="FD001", data_dir=str(tmp_path / "CMAPSSData"),
                    sensor_columns=["s_2", "s_3", "s_4"], max_rul=40)

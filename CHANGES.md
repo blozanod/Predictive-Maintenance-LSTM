@@ -757,6 +757,57 @@ trajectory; the default `ChronosForecaster`'s backbone load/call is the
 `# pragma: no cover` boundary). `# DECISION (uncited):` records the index construction
 and the threshold calibration.
 
+## 40. Milestone 0/1 review fixes (win-rule/zero-shot, noise key, Chronos coverage, deps)
+Four defects found in an adversarial review of the M0/M1 build, fixed here. No recorded
+result changes; the FD001 window/embedding keys stay byte-identical
+(`windows_FD001_1da313c871251cec`, `emb_FD001_chronos-2_forecast_token_w30_c30_v2_…`).
+
+- **Zero-shot is now scoreable by the win-rule (`src/scoring.py`).** IMPLEMENTATION_PLAN
+  §4.5 scores the RQ-Z arm "with the win-rule vs the `predict_mean`/`cycle_reg` floors,"
+  but `run_zeroshot` tags its model `<tag>_zeroshot` while `is_tsfm_model` recognized
+  only `_mlp` — so `success_map` on a `zeroshot.csv` returned ZERO rows (the zero-shot
+  prediction was mis-read as a *competitor baseline*, leaving no TSFM row to judge).
+  `is_tsfm_model` now accepts both suffixes (`TSFM_SUFFIXES = ("_mlp", "_zeroshot")`),
+  and `win_verdict` / `success_map` gain `compare_to_floors=False`: when set (the
+  zero-shot path) the **best floor** becomes the comparison bar and the hollow guard is
+  skipped (beating a floor is the whole point). The default core/probe path is
+  unchanged — a cell with only floors is still skipped. The strongest-bar selection is
+  factored into `_strongest_by_predicate` so competitor-bar and floor-bar share one
+  implementation. (The zero-shot arm has a single seed, so its paired test is
+  under-powered → verdicts are conservatively `tie` unless run multi-seed; the row
+  still carries the signed margin vs the floor.)
+- **`noise_injection` seed is now in the cache key (`src/config.py`, `src/data.py`).**
+  `apply_noise_injection` seeds the perturbation with `spec.get("seed", config.seed)`,
+  but the window/embedding key folded in only the spec dict — so two configs differing
+  ONLY in `config.seed` (same spec, no explicit spec seed) produced identical keys yet
+  different perturbed data, silently reusing a stale cache (a violation of "cache keys
+  are pure functions of Config," §1.2). New `Config.effective_noise_seed()` is the
+  single resolution used by BOTH the perturbation and the key; `_window_key_fields`
+  now adds `noise_seed` alongside `noise_injection` — **only when noise is set**, so
+  every unperturbed key is byte-identical and `config.seed` stays absent from the
+  no-noise key. An explicit `spec["seed"]` still pins a reproducible realization.
+- **`ChronosEmbedder` refactored onto the tested base (`src/models/chronos.py`,
+  `src/embeddings.py`).** The four v2 backbones isolate the GPU call in
+  `_encode_batch`/`_load_pipeline` (the sole `# pragma: no cover`) and inherit the
+  shared batching/pooling/loc-scale path, so they are CPU-tested; Chronos-2 alone kept
+  a bespoke `embed_windows` with inline pooling and NO pragma, sitting at 29% coverage
+  and unreachable under the "100% + single-pragma" gate (M0.1). It now extends
+  `TSFMEmbedderBase` (`n_special_tokens = 2` for its REG+forecast tokens, `layout =
+  "multivariate"`); only the two pragma'd backbone methods differ → **100% coverage**.
+  The on-device pooling micro-optimization (§13) is retired in favor of the single
+  host-side pooling reference — Stage A is one-time and cached, so the extra transfer
+  is immaterial. The now-unused on-device twin `embeddings._pool_one_torch` (and its two
+  tests) is deleted; `pool_window_embedding` is the single pooling reference for all
+  five backbones.
+- **The four backbone deps are declared (`requirements.txt`).** `momentfm`, `uni2ts`,
+  `timesfm`, `granite-tsfm` were referenced by the new embedders and by
+  `package_versions()` but never listed, so `pip install -r requirements.txt` left the
+  M1 embedders un-importable and the Phase-1 spikes unrunnable. Added under a "v2 TSFM
+  backbones (GPU; Stage A only)" block, conservatively pinned, imported only inside each
+  `_load_pipeline` (never by the CPU tests). The M2+ libs (pycatch22, sksurv/lifelines,
+  pyarrow) still arrive with their own milestones — `package_versions()` reports them
+  `not-installed` until then, by design (§32).
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from

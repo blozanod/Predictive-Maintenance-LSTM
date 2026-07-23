@@ -108,6 +108,24 @@ def test_chronos_forecaster_constructs_without_backbone():
     assert f.model_name == "amazon/chronos-2" and f._pipeline is None
 
 
+def test_zeroshot_arm_is_scoreable_by_the_win_rule(tmp_path):
+    """The plan (IMPLEMENTATION_PLAN §4.5) scores the zero-shot arm with the win-rule
+    vs the floors. Before §40 this yielded ZERO rows (the ``_zeroshot`` tag was not
+    recognized as a TSFM); it must now produce a scored row against a floor."""
+    from src import scoring as SC
+    cfg = _cfg(tmp_path)
+    write_synthetic_cmapss(Path(cfg.data_dir), n_train_units=8, n_test_units=6)
+    out = Z.run_zeroshot(cfg, forecaster_factory=lambda c: _RampForecaster(slope=0.2))
+    assert SC.success_map(out) == []                        # unscoreable as a core cell
+    table = SC.success_map(out, compare_to_floors=True)     # the zero-shot scoring path
+    assert len(table) == 1
+    row = table[0]
+    assert row["model"] == "chronos-2_zeroshot"
+    assert row["verdict"] in ("win", "tie", "loss")         # a real verdict, not skipped
+    assert row["best_baseline"] in ("predict_mean", "cycle_reg")
+    assert np.isfinite(row["margin"])
+
+
 def test_run_zeroshot_predictions_within_cap(tmp_path):
     cfg = _cfg(tmp_path)
     write_synthetic_cmapss(Path(cfg.data_dir), n_train_units=8, n_test_units=6)

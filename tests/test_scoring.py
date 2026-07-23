@@ -129,6 +129,56 @@ def test_win_verdict_skips_cells_without_competitor():
 
 
 # ---------------------------------------------------------------------------
+# zero-shot arm: recognized as a TSFM + scored against the floors (RQ-Z, §4.5)
+# ---------------------------------------------------------------------------
+def test_is_tsfm_recognizes_mlp_and_zeroshot():
+    assert SC.is_tsfm_model("chronos-2_mlp")
+    assert SC.is_tsfm_model("moirai-2_zeroshot")           # the RQ-Z arm is a TSFM too
+    assert not SC.is_competitor_baseline("chronos-2_zeroshot")   # never a competitor bar
+    assert not SC.is_tsfm_model("gbm")
+
+
+def test_win_verdict_compare_to_floors_scores_zeroshot():
+    # the zero-shot arm carries only the TSFM + the two floors (no competitor baseline).
+    rows = (_rows("chronos-2_zeroshot", "FD001", 0, _seeds([10, 11, 9, 10, 10]))
+            + _rows("predict_mean", "FD001", 0, _seeds([40, 41, 39, 42, 38]))
+            + _rows("cycle_reg", "FD001", 0, _seeds([30, 32, 28, 31, 29])))
+    # default path: floors are excluded => no competitor => no verdict (the old gap)
+    assert SC.win_verdict(rows, Config()) == {}
+    # floors-as-bar: scored against the TOUGHER (lower) floor, cycle_reg
+    v = SC.win_verdict(rows, Config(), compare_to_floors=True)
+    key = ("FD001", 0, "chronos-2_zeroshot")
+    assert v[key]["verdict"] == "win"
+    assert v[key]["best_baseline"] == "cycle_reg"
+    assert v[key]["margin"] == pytest.approx(20.0) and v[key]["n_seeds"] == 5
+
+
+def test_win_verdict_compare_to_floors_loss_no_hollow():
+    # worse than both floors => loss; the hollow guard never fires when floors are the bar.
+    rows = (_rows("chronos-2_zeroshot", "FD001", 0, _seeds([50, 51, 49, 50, 50]))
+            + _rows("predict_mean", "FD001", 0, _seeds([30, 32, 28, 31, 29]))
+            + _rows("cycle_reg", "FD001", 0, _seeds([40, 41, 39, 42, 38])))
+    v = SC.win_verdict(rows, Config(), compare_to_floors=True)
+    assert v[("FD001", 0, "chronos-2_zeroshot")]["verdict"] == "loss"
+
+
+def test_success_map_compare_to_floors(tmp_path):
+    rows = (_rows("chronos-2_zeroshot", "FD001", 0, _seeds([10, 11, 9, 10, 10]),
+                  rmse_by_seed=_seeds([7, 7, 7, 7, 7]))
+            + _rows("predict_mean", "FD001", 0, _seeds([40, 41, 39, 42, 38]))
+            + _rows("cycle_reg", "FD001", 0, _seeds([30, 32, 28, 31, 29])))
+    csv_path = tmp_path / "combo_zeroshot.csv"
+    for r in rows:
+        append_result_row(csv_path, r)
+    assert SC.success_map(csv_path) == []                       # default: unscoreable
+    table = SC.success_map(csv_path, compare_to_floors=True)    # the plan's zero-shot path
+    assert len(table) == 1
+    assert table[0]["model"] == "chronos-2_zeroshot"
+    assert table[0]["verdict"] == "win"
+    assert np.isfinite(table[0]["tsfm_rmse_clipped"])
+
+
+# ---------------------------------------------------------------------------
 # success_map: reads per-combo CSVs and returns the table
 # ---------------------------------------------------------------------------
 def test_success_map_from_directory(tmp_path):
