@@ -918,6 +918,82 @@ Re-run of the §43 fixes on fresh runtimes:
   non-ft variants; ft variants prepend one freq patch → patches+1, absorbed by the shared
   pooling). `# DECISION (uncited)`. Re-verify TTM on a fresh runtime.
 
+## 45. catch22_gbm baseline + the C-MAPSS cross-TSFM Colab campaign (Stage A per model → Stage B once)
+Wires the five GPU-verified backbones (§32–§44) into a runnable C-MAPSS campaign on Colab
+and adds the last cheap foil the roster was missing. **The only `src/` change is the new
+baseline**; everything else is notebook wiring around functions that already exist and pass
+tests (`run_campaign`, `run_sweep`, `scoring.success_map`, `plots.*`, `horizon.run_earliness`).
+No recorded result, cache key, or CSV schema changes; the FD001 keys stay byte-identical
+(`windows_FD001_1da313c871251cec`) and `pytest -q` stays green.
+
+- **`catch22_gbm` baseline (`src/baselines.py`, `requirements.txt`).** The hand-crafted-
+  indicator foil (RESEARCH_PLAN §6, RQ-D: "do TSFMs make hand-crafted indicators
+  obsolete?"). `catch22_features` computes the 22 canonical catch22 features
+  (`pycatch22`, Lubba et al. 2019) **per channel per window** and concatenates them
+  (`(N, 22·C)`); `Catch22GBMBaseline` feeds them to `lightgbm.LGBMRegressor` behind the
+  **same `Baseline` interface** as `gbm` (`fit(train_w, train_y, val_w, val_y)` /
+  `predict(test_w)`), registered in `BASELINES`. `pycatch22` is imported lazily inside
+  `catch22_features` and, like the `lightgbm`/`sktime` baseline imports (NOT the GPU-only
+  backbone loads), carries **no `# pragma: no cover`** — it is a CPU core dep exercised by
+  the test, so the coverage policy's single sanctioned pragma boundary (§32) is untouched.
+  `pycatch22` is added to `requirements.txt`'s **core** section (IMPLEMENTATION_PLAN §2
+  lists it as core; tests use it). `run_sweep`'s DEFAULT baseline list is **unchanged**
+  (recorded behaviour preserved) — `catch22_gbm` is opted in via `baseline_names` in the
+  Stage-B notebook. A new test (`tests/test_smoke.py::test_catch22_gbm_baseline`) mirrors
+  the gbm/minirocket test (`importorskip` both libs), asserts the `22·C` feature width, and
+  exercises fit/predict on **both** the no-val and val (`eval_set`) branches (full line +
+  branch coverage of the new code).
+
+- **Per-model dependency isolation forces a Stage-A / Stage-B split (why two kinds of
+  notebook).** The five backbones cannot share one environment (§42), and Stage B needs
+  none of them once the embeddings are cached — so the split lands on the repo's existing
+  Stage-A (embed → cache) / Stage-B (read cache → train heads + baselines) seam, with the
+  **embedding cache on Google Drive as the hand-off**. Stage A and Stage B build the SAME
+  canonical `Config` for every cache-key field (dataset / window / sensors / max_rul /
+  model_name / pooling / tsfm_context_length / condition_norm) at the recorded §12 winner
+  shape (`tsfm_context_length=256`, `pooling="mean"`; `head_features="emb+locscale"` is a
+  Stage-B knob that does NOT change the cache, §9), so Stage B's `embedding_cache_key`
+  matches the caches Stage A wrote.
+
+- **Stage-A notebooks (`notebooks/campaign/{chronos,moment,timesfm,ttm,moirai}.ipynb`).**
+  One per model, mirroring `notebooks/verify/<model>.ipynb`: clone the campaign branch →
+  install ONLY that model's isolated stack (`requirements/<model>.txt`; MOMENT `--no-deps`)
+  → mount Drive → build the canonical `Config` (`data_root="Data"` since C-MAPSS is
+  committed, `cache_dir`/`results_dir` under a Drive folder, `model_name` = the exact
+  `EMBEDDERS` registry key, e.g. `google/timesfm-2.5-200m-pytorch`,
+  `Salesforce/moirai-2.0-R-small`) → `run_campaign(models=[that_model],
+  datasets=["FD001".."FD004"], stages=["cache"], device="cuda")` (embeds + caches; the
+  embedder auto-detects the GPU). A trailing cell also runs `build_horizon_cache` for the
+  four datasets — the **GPU half of the horizon/earliness deliverable** (embed every test
+  cycle), so Stage B (no backbone) finds the sidecar cache on Drive and only trains. Each
+  notebook says "fresh GPU runtime, one model per runtime" and every step is restartable.
+
+- **Stage-B notebook (`notebooks/campaign/score.ipynb`).** ONE core runtime: clone →
+  `pip install -r requirements.txt` (core + Chronos-2 only; the four v2 backbones are NOT
+  in it, and chronos-forecasting is never imported because the caches exist) → mount the
+  same Drive folder → the SAME canonical `Config` →
+  `run_campaign(models=[all five EMBEDDERS keys], datasets=["FD001".."FD004"],
+  stages=["sweep","fairness","horizon","figures"],
+  baseline_names=["predict_mean","gbm","minirocket","cnn","lstm","catch22_gbm"])` — reads
+  the five caches, trains heads + baselines, writes per-combo `*_results_v2.csv` +
+  data-scaling/horizon figures. Then the CROSS-TSFM deliverables reuse tested functions:
+  `scoring.success_map` over `results_dir/*_results_v2.csv`
+  (`cell_fields=("dataset","n_units")`) → `plots.plot_success_map` (the win/tie/loss/hollow
+  map); the per-combo `*_results_v2.csv` concatenated into one frame →
+  `plots.plot_data_scaling` (all five models on one curve per dataset/metric); and
+  `horizon.run_earliness` over the concatenated `*_horizon_predictions.csv` →
+  `plots.plot_earliness` / `plots.plot_cost_curve`. Baselines re-run per combo, so their
+  rows repeat across combo CSVs — the concatenation **dedupes** them (one row per logical
+  data point; the `<tag>_mlp` TSFM rows are unique per model), which matters especially for
+  the cost curve's sums; the combined CSVs are named so the `*_results_v2.csv` /
+  `*_horizon_predictions.csv` globs never re-pick them up.
+
+- **Scope of this run.** RQ-Z zero-shot (`src/zeroshot.py`) and RQ-M representation-fairness
+  (`sweep.run_representation_fairness`) use the TSFM's forecasting/embedding on GPU, so they
+  belong in the per-model Stage-A notebooks, NOT Stage B; they are left out of this first
+  core run (added later as optional Stage-A cells) so nothing blocks the core campaign. No
+  result numbers or claims are written anywhere — no runs happen here (Task 2.5).
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from

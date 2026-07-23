@@ -79,6 +79,13 @@ notebooks/       One notebook per dataset family, each self-cloning the repo fro
   ncmapss.ipynb  Config → Campaign (run_campaign restricted to that family). cmapss.ipynb
                  also carries the gated FD001 deep-dives (ablation → winner, sweep,
                  raised-cap, transfer, plots).
+  verify/        One notebook per backbone: install its isolated requirements/<model>.txt
+                 and run the weight-level GPU spike (scripts/verify_backbones_colab.py).
+  campaign/      The cross-TSFM C-MAPSS campaign (CHANGES.md §45): Stage A per model
+                 (chronos/moment/timesfm/ttm/moirai.ipynb — one GPU runtime each, embed →
+                 cache to Drive) → Stage B (score.ipynb — one core runtime, read the five
+                 caches, train heads + baselines incl. catch22_gbm, emit the success map,
+                 cross-model data-scaling, and earliness/cost figures).
 ```
 
 ## Run the tests (CPU, no download)
@@ -127,6 +134,28 @@ never mirror or re-upload the repo. Open one (or several at once) and hit **Run 
    Config cell) — the single-dataset FD001 studies: the context/feature ablation, learning
    curves, the CORN-vs-MSE paired-significance table, the raised-label-cap arm (max_rul=200),
    and the FD001→FD003 cold-start transfer.
+
+### Cross-TSFM C-MAPSS campaign (`notebooks/campaign/`, CHANGES.md §45)
+
+The five backbones have mutually incompatible dependencies (CHANGES.md §42), so the
+cross-TSFM comparison splits along the embedding cache — a clean Drive hand-off — into
+per-model **Stage A** and a single **Stage B**:
+
+1. **Stage A — one GPU runtime per model.** Open `notebooks/campaign/<model>.ipynb`
+   (`chronos`, `moment`, `timesfm`, `ttm`, `moirai`) on a fresh GPU runtime, install only
+   that model's `requirements/<model>.txt`, and run it: it embeds FD001–FD004 with that one
+   frozen TSFM and writes the `.npz` caches to Drive (`run_campaign(..., stages=["cache"])`
+   plus the horizon caches). Restartable; run all five (in parallel on separate runtimes).
+2. **Stage B — one core runtime.** Open `notebooks/campaign/score.ipynb`, `pip install -r
+   requirements.txt` (core only, no backbones — the embeddings are cached), point `DRIVE` at
+   the same folder, and run it: `run_campaign(..., models=[all five],
+   stages=["sweep","fairness","horizon","figures"], baseline_names=[…,"catch22_gbm"])` reads
+   the caches and trains heads + baselines, then it assembles the cross-TSFM **success map**,
+   the combined cross-model **data-scaling** curves, and the **earliness / cost** figures.
+
+Both stages build the **same canonical `Config`** for every cache-key field (the recorded
+§12 winner shape: `tsfm_context_length=256`, `pooling="mean"`), so Stage B finds exactly the
+caches Stage A wrote.
 
 ## Audit the uncited decisions
 

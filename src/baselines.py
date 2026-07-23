@@ -8,12 +8,15 @@ is fit on the current fraction's TRAIN windows only (Task 2.4).
 Reuse over reimplementation (Task 2.1):
   * GBM  -> ``lightgbm.LGBMRegressor`` on per-window summary statistics.
   * MiniRocket -> ``sktime`` ``MiniRocketMultivariate`` + ridge (RidgeCV).
+  * catch22_gbm -> ``pycatch22`` (the 22 canonical time-series features per channel)
+    -> ``lightgbm.LGBMRegressor`` -- the hand-crafted-indicator foil (RESEARCH_PLAN §6,
+    RQ-D: "do TSFMs make hand-crafted indicators obsolete?").
 The 1D-CNN and LSTM are genuine from-scratch NN baselines (no maintained library
 reference exists for the C-MAPSS-specific architectures); they are the comparison
 targets, implemented small and standard.
 
-Heavy deps (lightgbm, sktime) are imported lazily so CPU smoke tests that only use
-the mean/NN baselines need not install them.
+Heavy deps (lightgbm, sktime, pycatch22) are imported lazily so CPU smoke tests that
+only use the mean/NN baselines need not install them.
 """
 
 from __future__ import annotations
@@ -145,6 +148,57 @@ class MiniRocketBaseline(Baseline):
 
 
 # ---------------------------------------------------------------------------
+# catch22 features + GBM (the hand-crafted-indicator foil -- RESEARCH_PLAN §6, RQ-D)
+# ---------------------------------------------------------------------------
+def catch22_features(windows: np.ndarray) -> np.ndarray:
+    """The 22 canonical catch22 features per CHANNEL per window, concatenated across
+    channels (Lubba et al. 2019, ``pycatch22``). Shape ``(N, 22*C)`` -- the fixed,
+    hand-crafted time-series indicator set the TSFM embedding is judged against.
+
+    ``pycatch22`` is imported lazily inside the loop (a core dep exercised by the
+    catch22_gbm test; the mean/NN CPU smoke tests never call this). Degenerate (e.g.
+    constant) channels can yield NaN for some features -- LightGBM consumes NaN
+    natively, so they are left as-is rather than silently imputed."""
+    import pycatch22  # reuse reference impl (Task 2.1); catch22 = Lubba et al. 2019
+    N, W, C = windows.shape
+    x = np.asarray(windows, np.float64)
+    feats = np.empty((N, C * 22), np.float32)
+    for i in range(N):
+        row: list = []
+        for c in range(C):
+            row.extend(pycatch22.catch22_all(x[i, :, c].tolist())["values"])
+        feats[i] = row
+    return feats
+
+
+class Catch22GBMBaseline(Baseline):
+    """catch22 indicators -> LightGBM, the SAME interface as ``GBMBaseline`` but with
+    the 22 canonical hand-crafted features per channel in place of the window
+    statistics -- the cheap "are hand-crafted indicators enough?" foil (RQ-D)."""
+    name = "catch22_gbm"
+
+    def __init__(self, config: Config, seed: int = 0):
+        self.config = config
+        self.seed = seed
+        self._model = None
+
+    def fit(self, train_windows, train_labels, val_windows=None, val_labels=None):
+        from lightgbm import LGBMRegressor  # reuse reference impl (Task 2.1)
+        Xtr = catch22_features(train_windows)
+        self._model = LGBMRegressor(random_state=self.seed, n_estimators=500,
+                                    learning_rate=0.05, verbose=-1,
+                                    n_jobs=-1)  # all cores (Task 2 perf)
+        fit_kw = {}
+        if val_windows is not None and len(val_windows):
+            fit_kw["eval_set"] = [(catch22_features(val_windows), val_labels)]
+        self._model.fit(Xtr, np.asarray(train_labels, np.float64), **fit_kw)
+        return self
+
+    def predict(self, windows) -> np.ndarray:
+        return self._clip(self._model.predict(catch22_features(windows)))
+
+
+# ---------------------------------------------------------------------------
 # From-scratch NN baselines (torch): 1D-CNN (Li et al. 2018-style) and LSTM
 # ---------------------------------------------------------------------------
 def _train_torch_regressor(model, config, train_windows, train_labels,
@@ -273,6 +327,7 @@ BASELINES = {
     "predict_mean": PredictMeanBaseline,
     "gbm": GBMBaseline,
     "minirocket": MiniRocketBaseline,
+    "catch22_gbm": Catch22GBMBaseline,
     "cnn": CNNBaseline,
     "lstm": LSTMBaseline,
 }

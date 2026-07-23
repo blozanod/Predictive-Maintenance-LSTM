@@ -13,9 +13,10 @@ h5py>=3.10                # N-CMAPSS .h5 loader (src/datasets/ncmapss.py); tests
 
 # --- losses / baselines ---
 coral-pytorch>=1.4        # CORN ordinal loss (Shi, Cao & Raschka 2021)
-lightgbm>=4.0             # GBM baseline
+lightgbm>=4.0             # GBM baseline (also the catch22_gbm regressor)
 sktime>=1.0              # MiniRocketMultivariate
 numba>=0.59              # required by sktime's MiniRocket
+pycatch22>=0.4           # catch22 features for the catch22_gbm baseline (Lubba et al. 2019); tests use it
 
 # --- foundation model (GPU; Stage A only) ---
 chronos-forecasting>=2.0.0   # official Chronos2Pipeline.embed()
