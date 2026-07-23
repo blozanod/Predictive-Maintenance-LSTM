@@ -126,6 +126,75 @@ def test_base_accepts_fixed_array_input():
 
 
 # ---------------------------------------------------------------------------
+# Batching path shared by MOMENT/TimesFM/Moirai/TTM (_grouped_forward, §46)
+# ---------------------------------------------------------------------------
+class _BatchedFakeEmbedder(TSFMEmbedderBase):
+    """Univariate-style fake that runs the REAL _grouped_forward + _regroup_channels
+    path with a deterministic per-series 'forward' (output depends only on the series),
+    so the grouping / sub-chunking / scatter-back correctness is covered without a
+    backbone -- the exact machinery the four v2 embedders now use."""
+    embedder_name = "_BatchedFakeEmbedder"
+
+    def __init__(self, config, device=None, d_model=5):
+        super().__init__(config, device=device)
+        self._d = d_model
+
+    def _encode_batch(self, batch):
+        items, chans = [], []
+        for w in batch:
+            w = np.asarray(w, np.float32)
+            chans.append(w.shape[1])
+            for c in range(w.shape[1]):
+                s = w[:, c]
+                items.append((s, max(1, len(s) // 2)))   # length -> num-patches (groups)
+
+        def _fwd(group):
+            assert len({g[1] for g in group}) == 1        # shape-homogeneous batch
+            return [(float(s.sum()) + np.arange(npatch * self._d, dtype=np.float32)
+                     ).reshape(npatch, self._d) for s, npatch in group]
+
+        flat = self._grouped_forward(items, lambda it: it[1], _fwd)
+        return self._regroup_channels(flat, chans), self.loc_scale_from_contexts(batch)
+
+
+def test_grouped_forward_preserves_order_and_batches_by_shape():
+    e = _BatchedFakeEmbedder(Config(dataset="FD001", embed_batch_size=2))
+    seen = []
+    e._grouped_forward([3, 3, 7, 3, 7], lambda x: x,
+                       lambda g: (seen.append(list(g)) or [v * 10 for v in g]))
+    out = e._grouped_forward([3, 3, 7, 3, 7], lambda x: x, lambda g: [v * 10 for v in g])
+    assert out == [30, 30, 70, 30, 70]                    # original order preserved
+    for g in seen:                                        # every forward call is...
+        assert len(set(g)) == 1                           # ...shape-homogeneous
+        assert len(g) <= 2                                # ...and capped at batch_size
+
+
+def test_regroup_channels_stacks_window_major():
+    e = _BatchedFakeEmbedder(Config(dataset="FD001"))
+    flat = [np.full((2, 3), i, np.float32) for i in range(5)]   # 5 = 2 + 3 channels
+    canon = e._regroup_channels(flat, [2, 3])
+    assert canon[0].shape == (2, 2, 3) and canon[1].shape == (3, 2, 3)
+    assert np.array_equal(canon[0][1], flat[1]) and np.array_equal(canon[1][0], flat[2])
+
+
+def test_batched_embed_is_invariant_to_batch_size():
+    """The batched _encode_batch path must produce byte-identical embeddings regardless
+    of embed_batch_size -- the CPU guarantee behind the GPU speedup (§46). Mixed context
+    lengths force multiple shape-groups and sub-chunking."""
+    rng = np.random.default_rng(3)
+    ctx = [rng.normal(size=(L, 3)).astype(np.float32) for L in (6, 6, 10, 4, 10, 8)]
+    ref = None
+    for bs in (1, 2, 4, 100):
+        emb, ls = _BatchedFakeEmbedder(
+            Config(dataset="FD001", embed_batch_size=bs), d_model=5).embed_windows(ctx)
+        assert emb.shape == (6, 3 * 5)                     # forecast_token pooling -> C*d
+        if ref is None:
+            ref = emb
+        else:
+            assert np.allclose(emb, ref)                   # batch-size-invariant
+
+
+# ---------------------------------------------------------------------------
 # Registry + describe (concrete embedders, no backbone touched)
 # ---------------------------------------------------------------------------
 def test_all_five_embedders_registered_and_selectable():
