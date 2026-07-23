@@ -131,7 +131,7 @@ def test_base_accepts_fixed_array_input():
 def test_all_five_embedders_registered_and_selectable():
     expected = {
         "amazon/chronos-2": ChronosEmbedder,
-        "Salesforce/moirai-2": MoiraiEmbedder,
+        "Salesforce/moirai-2.0-R-small": MoiraiEmbedder,
         "AutonLab/MOMENT-1-large": MomentEmbedder,
         "google/timesfm-2.5-200m-pytorch": TimesFMEmbedder,
         "ibm-granite/granite-timeseries-ttm-r2": TTMEmbedder,
@@ -178,7 +178,7 @@ def test_new_embedder_describe_reflects_layout_and_aggregation():
     assert d["layout"] == "univariate" and d["n_special_tokens"] == 0
     assert d["channel_aggregation"] == "mean" and d["pooling"] == "mean"
     # multivariate-native members carry the multivariate label
-    for name in ("Salesforce/moirai-2", "ibm-granite/granite-timeseries-ttm-r2"):
+    for name in ("Salesforce/moirai-2.0-R-small", "ibm-granite/granite-timeseries-ttm-r2"):
         assert make_embedder(Config(dataset="FD001", model_name=name)).describe()[
             "layout"] == "multivariate"
 

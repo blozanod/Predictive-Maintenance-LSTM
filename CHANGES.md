@@ -883,6 +883,27 @@ Resolution — one isolated stack per backbone, one fresh runtime per backbone:
   includes `model_name`, so only TimesFM's (never-built) cache key changes; FD001/Chronos
   keys are untouched.
 
+## 43. Colab GPU verification round 1 — 3/5 pass; Moirai id + TTM torch/torchvision fixes
+First real weight-level run of the §42 verify notebooks on a Colab GPU. **Chronos-2,
+TimesFM 2.5, and MOMENT PASS** — finite, non-degenerate embeddings at the expected width
+`F = n_variates·d_model` (Chronos 8·768=6144, TimesFM 8·1280=10240, MOMENT 8·1024=8192),
+loc/scale `(N, n_variates, 2)` — confirming the pooling/aggregation/loc-scale contract end
+to end for three backbones. Two failed and are fixed here:
+- **Moirai-2 — wrong HF id** (same class of bug as TimesFM). `Salesforce/moirai-2` made
+  `Moirai2Module.from_pretrained` build with an empty config (`__init__() missing 7
+  required positional arguments`). The real id is **`Salesforce/moirai-2.0-R-small`**
+  (uni2ts README loads exactly that). Updated `EMBEDDERS` + tests; the `_encode_batch`
+  encoder path is unchanged (it was never reached before).
+- **TTM — torch/torchvision ABI mismatch.** `from tsfm_public import get_model` pulls
+  `from transformers import PreTrainedModel`, whose object-detection loss imports
+  torchvision; Colab's stock torchvision (0.26, wants torch 2.11) mismatches the torch
+  2.10 that granite-tsfm requires → `operator torchvision::nms does not exist`.
+  `requirements/ttm.txt` now pins the matched pair **`torch==2.10.0` + `torchvision==0.25.0`**
+  (torchvision 0.25.0 requires exactly torch 2.10.0, verified on PyPI; granite-tsfm accepts
+  torch>=2.10,<2.11). The other three backbones' transformers-import paths never touch
+  torchvision, which is why they passed.
+Both are one-line-ish, ship in the same PR; re-verify TTM and Moirai on a fresh runtime.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
