@@ -1,0 +1,5 @@
+# TTM (ibm-granite/granite-timeseries-ttm-r2) via granite-tsfm (provides tsfm_public).
+# Wants torch 2.10.x (Colab default) + transformers >=4.57 -> installs cleanly on a FRESH
+# runtime. The `torchvision::nms` failure seen earlier was a runtime already poisoned by
+# an earlier uni2ts torch downgrade, NOT granite-tsfm; a clean runtime avoids it.
+granite-tsfm>=0.2.22

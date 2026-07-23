@@ -850,6 +850,39 @@ Two follow-ups to the M0/M1 review.
     Final validation of these bodies (and the exact HF repo ids) is that spike, per
     RESEARCH_PLAN §9/§11 — a backbone that still fails is reported, not forced.
 
+## 42. Per-model dependency isolation (the backbones can't share one environment)
+Running the §41 Colab verification revealed that the four v2 backbones + Chronos-2 have
+**mutually incompatible dependency pins** — no single environment can hold them, and the
+combined `pip install -r requirements.txt` backtracks to `ResolutionTooDeep`. Proven on a
+fresh Colab GPU runtime:
+- **Moirai-2** (`uni2ts`) pins `torch<2.5`, so it uninstalls Colab's torch 2.10 and installs
+  2.4.1 — which no longer matches the preinstalled `torchvision` (`operator
+  torchvision::nms does not exist`), and that poisoned torch/torchvision then breaks
+  Chronos-2 and TTM (their `transformers` import walks through torchvision).
+- **MOMENT** (`momentfm`) hard-pins `numpy==1.25.2` (no Python-3.12 wheel → source build fails)
+  and `huggingface-hub==0.24.0`.
+
+Resolution — one isolated stack per backbone, one fresh runtime per backbone:
+- **`requirements/` (new)**: `chronos.txt`, `ttm.txt`, `timesfm.txt`, `moirai.txt`,
+  `moment.txt`, each a self-consistent stack, plus a `README.md` documenting every
+  conflict. `moirai.txt` pins `torch==2.4.1` **and** the matching `torchvision==0.19.1`;
+  `moment.txt` is installed `--no-deps` (its own pins are unbuildable). Pins are
+  best-effort, finalized per model on a GPU.
+- **Root `requirements.txt`** no longer lists the four v2 backbones (reverting the §40
+  block that caused the resolver blow-up); it stays the installable **core + Chronos-2**
+  for the CPU test suite and the Chronos campaign.
+- **`notebooks/verify/<model>.ipynb` (new, 5)**: one thin notebook per model — clone,
+  install only that model's `requirements/` file, run `verify_backbones_colab.py` for it.
+  Each says to use a fresh runtime (the backbones must not share one). The dataset axis is
+  deliberately NOT foldered: it carries no dependency variation, so it stays a runtime
+  parameter, not a directory (avoids ~20 near-identical notebooks).
+- **TimesFM repo-id fix**: the registry key `google/timesfm-2.5` 404'd on HuggingFace; the
+  real weights are `google/timesfm-2.5-200m-pytorch` (verified in the timesfm source's
+  `DEFAULT_REPO_ID`). Updated `EMBEDDERS` + the two test references. TimesFM's embedding
+  body itself was reached and correct — only the id was wrong. `_embedding_key_fields`
+  includes `model_name`, so only TimesFM's (never-built) cache key changes; FD001/Chronos
+  keys are untouched.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from

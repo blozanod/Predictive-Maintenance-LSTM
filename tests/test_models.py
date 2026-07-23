@@ -133,7 +133,7 @@ def test_all_five_embedders_registered_and_selectable():
         "amazon/chronos-2": ChronosEmbedder,
         "Salesforce/moirai-2": MoiraiEmbedder,
         "AutonLab/MOMENT-1-large": MomentEmbedder,
-        "google/timesfm-2.5": TimesFMEmbedder,
+        "google/timesfm-2.5-200m-pytorch": TimesFMEmbedder,
         "ibm-granite/granite-timeseries-ttm-r2": TTMEmbedder,
     }
     assert EMBEDDERS == expected
@@ -210,7 +210,7 @@ def _fairness_cfg(tmp_path: Path) -> Config:
 def _layout_factory(cfg: Config):
     """A mock whose layout mirrors the real model family, and whose aggregation
     tracks cfg.channel_aggregation -- so native/common genuinely change the width."""
-    univariate = cfg.model_name in ("AutonLab/MOMENT-1-large", "google/timesfm-2.5")
+    univariate = cfg.model_name in ("AutonLab/MOMENT-1-large", "google/timesfm-2.5-200m-pytorch")
     return MockEmbedder(feature_dim=8,
                         layout="univariate" if univariate else "multivariate",
                         channel_aggregation=cfg.channel_aggregation)

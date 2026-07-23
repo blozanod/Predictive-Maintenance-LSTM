@@ -1,0 +1,10 @@
+# Moirai-2 (Salesforce/moirai-2) via uni2ts.
+# uni2ts pins torch<2.5 (installs 2.4.1) and, through lightning -> torchmetrics, imports
+# torchvision -- so torchvision MUST match torch 2.4.x or you get
+# `operator torchvision::nms does not exist`. Pin the matching pair explicitly, and let
+# uni2ts pull the rest (numpy~=1.26, gluonts, jax; the jax resolve is slow but succeeds).
+# moirai2 + packed_causal_attention_mask ship only on uni2ts GitHub main, hence the git install.
+# Run in a FRESH runtime; verify via `!python`, so the numpy downgrade needs no kernel restart.
+torch==2.4.1
+torchvision==0.19.1
+git+https://github.com/SalesforceAIResearch/uni2ts.git

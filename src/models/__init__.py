@@ -29,7 +29,7 @@ EMBEDDERS = {
     "amazon/chronos-2": ChronosEmbedder,
     "Salesforce/moirai-2": MoiraiEmbedder,
     "AutonLab/MOMENT-1-large": MomentEmbedder,
-    "google/timesfm-2.5": TimesFMEmbedder,
+    "google/timesfm-2.5-200m-pytorch": TimesFMEmbedder,   # real HF weights id (verified on Colab)
     "ibm-granite/granite-timeseries-ttm-r2": TTMEmbedder,
 }
 
