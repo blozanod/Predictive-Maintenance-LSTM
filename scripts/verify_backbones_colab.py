@@ -60,13 +60,21 @@ def verify_one(model_name: str, device: str, n_channels: int = 8) -> dict:
     cfg = Config(dataset="FD001", model_name=model_name,
                  sensor_columns=list(DEFAULT_SENSOR_COLUMNS["cmapss"])[:n_channels],
                  tsfm_context_length=200)
-    contexts = _synthetic_contexts(n_windows=4, n_channels=n_channels)
+    # >1 window at MIXED lengths so the batched _encode_batch (CHANGES.md §46) forms
+    # several shape-groups and the batch-invariance check below is meaningful.
+    contexts = _synthetic_contexts(n_windows=12, n_channels=n_channels)
     res = {"model": model_name, "ok": False, "detail": ""}
     try:
         embedder = make_embedder(cfg, device=device)
         t0 = time.perf_counter()
-        emb, loc_scale = embedder.embed_windows(contexts)
+        emb, loc_scale = embedder.embed_windows(contexts)      # default (batched) path
         dt = time.perf_counter() - t0
+        # Batch-invariance: re-embed the SAME contexts one-series-at-a-time (batch_size=1,
+        # the pre-§46 behaviour) and require the result to match. This is the weight-level
+        # guard that the grouping/sub-chunk/scatter did not reorder or corrupt anything --
+        # a mis-scatter would grossly change the vectors, far beyond fp16 kernel noise.
+        embedder.batch_size = 1
+        emb1, _ = embedder.embed_windows(contexts)
         n = len(contexts)
         checks = {
             "emb.ndim == 2": emb.ndim == 2,
@@ -76,6 +84,8 @@ def verify_one(model_name: str, device: str, n_channels: int = 8) -> dict:
             "emb finite": bool(np.isfinite(emb).all()),
             "loc_scale finite": bool(np.isfinite(loc_scale).all()),
             "emb non-degenerate (std>0)": float(np.std(emb)) > 0.0,
+            "batch-invariant (bs=1)": bool(
+                np.allclose(emb, emb1, rtol=1e-2, atol=1e-2)),
         }
         res["ok"] = all(checks.values())
         res["detail"] = (f"emb={emb.shape} loc_scale={loc_scale.shape} "

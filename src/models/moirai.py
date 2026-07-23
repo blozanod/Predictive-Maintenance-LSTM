@@ -55,39 +55,50 @@ class MoiraiEmbedder(TSFMEmbedderBase):
         # (single-variate packing is the documented fallback that yields the canonical
         # (n_variates, patches, d_model); RESEARCH_PLAN §11). Verified against uni2ts's
         # moirai2/module.py; weight-level shapes are confirmed by the Colab spike.
+        # Series that share (num_patches, front-pad) stack into ONE encoder call via
+        # _grouped_forward -- the batch-1 per-(window, channel) loop left the GPU ~95%
+        # idle (CHANGES.md §46); each batched element is still an independent
+        # single-variate sequence (sample_id constant within an element), so the packed
+        # attention is unchanged.
         from uni2ts.common.torch_util import packed_causal_attention_mask
         module = self._load_pipeline()
         torch = self._torch
         dev = self._device_resolved
         patch = int(module.patch_size)
-        canonical = []
+
+        items, chans = [], []
         for w in batch:
             w = np.asarray(w, np.float32)                 # (L, C)
+            chans.append(w.shape[1])
             n = w.shape[0]
             pad = (-n) % patch
             npatch = (n + pad) // patch
-            per_variate = []
             for c in range(w.shape[1]):
                 s = np.concatenate([np.zeros(pad, np.float32), w[:, c]])
-                target = torch.as_tensor(s.reshape(npatch, patch), device=dev)[None]
-                observed = torch.ones(1, npatch, patch, dtype=torch.bool, device=dev)
-                if pad:
-                    observed[0, 0, :pad] = False
-                sample_id = torch.ones(1, npatch, dtype=torch.long, device=dev)
-                time_id = torch.arange(npatch, device=dev)[None]
-                variate_id = torch.zeros(1, npatch, dtype=torch.long, device=dev)
-                pred_mask = torch.zeros(1, npatch, dtype=torch.bool, device=dev)
-                with torch.inference_mode():
-                    loc, scale = module.scaler(
-                        target, observed * ~pred_mask.unsqueeze(-1), sample_id, variate_id)
-                    tokens = torch.cat([(target - loc) / scale,
-                                        observed.to(torch.float32)], dim=-1)
-                    reprs = module.in_proj(tokens)
-                    reprs = module.encoder(
-                        reprs, packed_causal_attention_mask(sample_id, time_id),
-                        time_id=time_id, var_id=variate_id)
-                per_variate.append(np.asarray(reprs[0].detach().to("cpu").float().numpy(),
-                                              np.float32))   # (npatch, d_model)
-            canonical.append(np.stack(per_variate, axis=0))  # (C, npatch, d_model)
-        loc_scale = self.loc_scale_from_contexts(batch)
-        return canonical, loc_scale
+                items.append((s.reshape(npatch, patch), npatch, pad))   # (npatch, patch)
+
+        def _fwd(group):
+            b = len(group)
+            npatch, pad = group[0][1], group[0][2]
+            target = torch.as_tensor(np.stack([g[0] for g in group]), device=dev)  # (b,np,patch)
+            observed = torch.ones(b, npatch, patch, dtype=torch.bool, device=dev)
+            if pad:
+                observed[:, 0, :pad] = False
+            sample_id = torch.ones(b, npatch, dtype=torch.long, device=dev)
+            time_id = torch.arange(npatch, device=dev)[None].expand(b, npatch)
+            variate_id = torch.zeros(b, npatch, dtype=torch.long, device=dev)
+            pred_mask = torch.zeros(b, npatch, dtype=torch.bool, device=dev)
+            with torch.inference_mode():
+                loc, scale = module.scaler(
+                    target, observed * ~pred_mask.unsqueeze(-1), sample_id, variate_id)
+                tokens = torch.cat([(target - loc) / scale,
+                                    observed.to(torch.float32)], dim=-1)
+                reprs = module.in_proj(tokens)
+                reprs = module.encoder(
+                    reprs, packed_causal_attention_mask(sample_id, time_id),
+                    time_id=time_id, var_id=variate_id)
+            arr = np.asarray(reprs.detach().to("cpu").float().numpy(), np.float32)  # (b,np,d)
+            return [arr[k] for k in range(arr.shape[0])]
+
+        flat = self._grouped_forward(items, lambda it: (it[1], it[2]), _fwd)  # key=(npatch,pad)
+        return self._regroup_channels(flat, chans), self.loc_scale_from_contexts(batch)

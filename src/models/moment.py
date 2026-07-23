@@ -53,32 +53,38 @@ class MomentEmbedder(TSFMEmbedderBase):
     def _encode_batch(self, batch):  # pragma: no cover -- GPU-only backbone call
         # MOMENT-1 has a FIXED input length (config.seq_len, 512 for -large) with no
         # auto-padding: the positional embedding is sized for it, so a raw variable-
-        # length series raises. We therefore place each channel's most-recent
-        # min(L, seq_len) cycles into a seq_len buffer and pass an input_mask marking
-        # the valid positions (the standard MOMENT contract; verified against
-        # momentfm 0.1.4). embed(reduction="mean") returns one summary vector per
-        # channel -> canonical (C, 1, d_model): a single "patch" the shared pooling
-        # collapses to (per RESEARCH_PLAN §6, MOMENT is used as a per-channel summary).
+        # length series raises. We place each channel's most-recent min(L, seq_len)
+        # cycles into a seq_len buffer + an input_mask marking the valid positions (the
+        # standard MOMENT contract; verified against momentfm 0.1.4). Every (window,
+        # channel) series shares seq_len, so they all stack into ONE embed() call rather
+        # than one call per series (batch-1 left the GPU ~95% idle -- CHANGES.md §46);
+        # embed(reduction="mean") returns one summary vector per series -> canonical
+        # (C, 1, d_model): a single "patch" the shared pooling collapses to (per
+        # RESEARCH_PLAN §6, MOMENT is used as a per-channel summary).
         model = self._load_pipeline()
         torch = self._torch
+        dev = self._device_resolved
         seq_len = int(model.config.seq_len)
-        canonical = []
+
+        items, chans = [], []
         for w in batch:
             w = np.asarray(w, np.float32)                 # (L, C)
+            chans.append(w.shape[1])
             take = min(w.shape[0], seq_len)
-            mask = np.zeros(seq_len, np.float32)
-            mask[:take] = 1.0
-            m = torch.as_tensor(mask, device=self._device_resolved)[None]  # (1, seq_len)
-            per_channel = []
+            mask = np.zeros(seq_len, np.float32); mask[:take] = 1.0
             for c in range(w.shape[1]):
                 buf = np.zeros(seq_len, np.float32)
                 buf[:take] = w[-take:, c]                 # most-recent `take` cycles
-                x = torch.as_tensor(buf, device=self._device_resolved)[None, None, :]
-                with torch.inference_mode():
-                    out = model.embed(x_enc=x, input_mask=m, reduction="mean")
-                emb = np.asarray(out.embeddings.detach().to("cpu").float().numpy(),
-                                 np.float32).reshape(-1)   # (d_model,)
-                per_channel.append(emb[None, :])          # (1, d_model)
-            canonical.append(np.stack(per_channel, axis=0))  # (C, 1, d_model)
-        loc_scale = self.loc_scale_from_contexts(batch)
-        return canonical, loc_scale
+                items.append((buf, mask))
+
+        def _fwd(group):
+            xb = torch.as_tensor(np.stack([g[0] for g in group]),
+                                 device=dev)[:, None, :]        # (b, 1, seq_len)
+            mb = torch.as_tensor(np.stack([g[1] for g in group]), device=dev)  # (b, seq_len)
+            with torch.inference_mode():
+                out = model.embed(x_enc=xb, input_mask=mb, reduction="mean")
+            emb = np.asarray(out.embeddings.detach().to("cpu").float().numpy(), np.float32)
+            return [emb[k][None, :] for k in range(emb.shape[0])]   # each (1, d_model)
+
+        flat = self._grouped_forward(items, lambda it: it[0].shape[0], _fwd)  # key=seq_len
+        return self._regroup_channels(flat, chans), self.loc_scale_from_contexts(batch)
