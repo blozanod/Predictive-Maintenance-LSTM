@@ -70,23 +70,6 @@ def test_channel_aggregation_concat_vs_mean_dims():
         E.aggregate_variates(emb[:, -1, :], "bogus")
 
 
-def test_torch_pooling_matches_numpy_all_layouts():
-    import torch
-    rng = np.random.default_rng(1)
-    emb = rng.normal(size=(3, 6, 5)).astype(np.float32)
-    for n_special in (0, 2):
-        for strat in ["forecast_token", "last_content", "mean", "flatten"]:
-            for agg in ["concat", "mean"]:
-                np_out = E.pool_window_embedding(emb, strat, agg, n_special)
-                t_out = E._pool_one_torch(torch.from_numpy(emb), strat, agg,
-                                          n_special).numpy()
-                assert np.allclose(np_out, t_out, atol=1e-5), (strat, agg, n_special)
-    with pytest.raises(ValueError, match="channel_aggregation"):
-        E._pool_one_torch(torch.from_numpy(emb), "mean", "bogus", 0)
-    with pytest.raises(ValueError, match="pooling"):
-        E._pool_one_torch(torch.from_numpy(emb), "bogus", "concat", 0)
-
-
 # ---------------------------------------------------------------------------
 # Shared base embed_windows (fake backbone -> no import)
 # ---------------------------------------------------------------------------

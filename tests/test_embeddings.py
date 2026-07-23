@@ -51,16 +51,6 @@ def test_pooling_needs_min_positions():
         E.pool_window_embedding(emb, "last_content")
 
 
-def test_torch_pooling_matches_numpy():
-    import torch
-    rng = np.random.default_rng(0)
-    emb = rng.normal(size=(3, 6, 5)).astype(np.float32)
-    for strat in ["forecast_token", "last_content", "mean", "flatten"]:
-        np_out = E.pool_window_embedding(emb, strat)
-        t_out = E._pool_one_torch(torch.from_numpy(emb), strat).numpy()
-        assert np.allclose(np_out, t_out, atol=1e-5), strat
-
-
 # ---------------------------------------------------------------------------
 # loc/scale normalization (defensive extractor)
 # ---------------------------------------------------------------------------

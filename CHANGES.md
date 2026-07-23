@@ -757,6 +757,99 @@ trajectory; the default `ChronosForecaster`'s backbone load/call is the
 `# pragma: no cover` boundary). `# DECISION (uncited):` records the index construction
 and the threshold calibration.
 
+## 40. Milestone 0/1 review fixes (win-rule/zero-shot, noise key, Chronos coverage, deps)
+Four defects found in an adversarial review of the M0/M1 build, fixed here. No recorded
+result changes; the FD001 window/embedding keys stay byte-identical
+(`windows_FD001_1da313c871251cec`, `emb_FD001_chronos-2_forecast_token_w30_c30_v2_…`).
+
+- **Zero-shot is now scoreable by the win-rule (`src/scoring.py`).** IMPLEMENTATION_PLAN
+  §4.5 scores the RQ-Z arm "with the win-rule vs the `predict_mean`/`cycle_reg` floors,"
+  but `run_zeroshot` tags its model `<tag>_zeroshot` while `is_tsfm_model` recognized
+  only `_mlp` — so `success_map` on a `zeroshot.csv` returned ZERO rows (the zero-shot
+  prediction was mis-read as a *competitor baseline*, leaving no TSFM row to judge).
+  `is_tsfm_model` now accepts both suffixes (`TSFM_SUFFIXES = ("_mlp", "_zeroshot")`),
+  and `win_verdict` / `success_map` gain `compare_to_floors=False`: when set (the
+  zero-shot path) the **best floor** becomes the comparison bar and the hollow guard is
+  skipped (beating a floor is the whole point). The default core/probe path is
+  unchanged — a cell with only floors is still skipped. The strongest-bar selection is
+  factored into `_strongest_by_predicate` so competitor-bar and floor-bar share one
+  implementation. (The zero-shot arm has a single seed, so its paired test is
+  under-powered → verdicts are conservatively `tie` unless run multi-seed; the row
+  still carries the signed margin vs the floor.)
+- **`noise_injection` seed is now in the cache key (`src/config.py`, `src/data.py`).**
+  `apply_noise_injection` seeds the perturbation with `spec.get("seed", config.seed)`,
+  but the window/embedding key folded in only the spec dict — so two configs differing
+  ONLY in `config.seed` (same spec, no explicit spec seed) produced identical keys yet
+  different perturbed data, silently reusing a stale cache (a violation of "cache keys
+  are pure functions of Config," §1.2). New `Config.effective_noise_seed()` is the
+  single resolution used by BOTH the perturbation and the key; `_window_key_fields`
+  now adds `noise_seed` alongside `noise_injection` — **only when noise is set**, so
+  every unperturbed key is byte-identical and `config.seed` stays absent from the
+  no-noise key. An explicit `spec["seed"]` still pins a reproducible realization.
+- **`ChronosEmbedder` refactored onto the tested base (`src/models/chronos.py`,
+  `src/embeddings.py`).** The four v2 backbones isolate the GPU call in
+  `_encode_batch`/`_load_pipeline` (the sole `# pragma: no cover`) and inherit the
+  shared batching/pooling/loc-scale path, so they are CPU-tested; Chronos-2 alone kept
+  a bespoke `embed_windows` with inline pooling and NO pragma, sitting at 29% coverage
+  and unreachable under the "100% + single-pragma" gate (M0.1). It now extends
+  `TSFMEmbedderBase` (`n_special_tokens = 2` for its REG+forecast tokens, `layout =
+  "multivariate"`); only the two pragma'd backbone methods differ → **100% coverage**.
+  The on-device pooling micro-optimization (§13) is retired in favor of the single
+  host-side pooling reference — Stage A is one-time and cached, so the extra transfer
+  is immaterial. The now-unused on-device twin `embeddings._pool_one_torch` (and its two
+  tests) is deleted; `pool_window_embedding` is the single pooling reference for all
+  five backbones.
+- **The four backbone deps are declared (`requirements.txt`).** `momentfm`, `uni2ts`,
+  `timesfm`, `granite-tsfm` were referenced by the new embedders and by
+  `package_versions()` but never listed, so `pip install -r requirements.txt` left the
+  M1 embedders un-importable and the Phase-1 spikes unrunnable. Added under a "v2 TSFM
+  backbones (GPU; Stage A only)" block, conservatively pinned, imported only inside each
+  `_load_pipeline` (never by the CPU tests). The M2+ libs (pycatch22, sksurv/lifelines,
+  pyarrow) still arrive with their own milestones — `package_versions()` reports them
+  `not-installed` until then, by design (§32).
+
+## 41. Multi-seed zero-shot + backbone `_encode_batch` verification (real library APIs)
+Two follow-ups to the M0/M1 review.
+
+- **Zero-shot now runs over multiple seeds (`src/zeroshot.py`).** The arm is
+  deterministic given its calibration set, so a single run is one lucky/unlucky draw of
+  observed failures. `run_zeroshot` now sweeps `config.sweep_seeds` (default 5); each seed
+  BOOTSTRAPS the calibration units (resample with replacement) before fitting the
+  unsupervised health-index transform, the failure threshold, and both floors — so the
+  reported seed-mean averages over draws and the win-rule's paired-seed test is no longer
+  vacuous. `ZEROSHOT_KEYS` gained `seed`; rows stay `n_units=0` (the 0-target-failures
+  endpoint); the health index still uses no RUL labels. Restartable per `(model, seed)`.
+
+- **The four v2 backbone bodies were verified against each library's real source and
+  corrected — all four had non-working API calls (`src/models/*.py`).** These
+  `_encode_batch`/`_load_pipeline` methods are the sole `# pragma: no cover` boundary; CPU
+  tests mock them, and the CI container has no GPU and no HuggingFace egress, so they were
+  written from assumed APIs and never executed. Verifying each against the installed
+  library (TTM, TimesFM signature-checked locally) and its GitHub source (MOMENT, Moirai):
+  - **MOMENT** — `.embeddings` and `model_kwargs={"task_name":"embedding"}` were right, but
+    MOMENT-1 hard-requires a FIXED `config.seq_len` (512) input with no auto-pad. Now pads
+    each channel's most-recent cycles into a 512 buffer + `input_mask` and calls
+    `embed(reduction="mean")` (verified against momentfm 0.1.4).
+  - **Moirai-2** — `Moirai2Module` has **no `.encode()`**; its `forward()` consumes packed
+    inputs and the reprs are internal. Rewritten to reproduce the encoder path
+    (`scaler → in_proj → encoder`) per variate, the documented encoder-hidden-states
+    fallback (RESEARCH_PLAN §11). Also: the `moirai2` submodule + `packed_causal_attention_mask`
+    are NOT in any PyPI `uni2ts` release (only GitHub main) → `requirements.txt` now installs
+    `uni2ts` from git.
+  - **TimesFM 2.5** — `TimesFM_2p5_200M_torch` has **no `.embed()`**; per-patch hidden states
+    are `output_embeddings` (index 1) of the underlying module's `forward(inputs, masks)`.
+    Rewritten to patch (p=32) + mask + RevIN-normalize + read `output_embeddings`
+    (signature-verified: `module.p`, the 4-tuple return, `torch_compile` kwarg).
+  - **TTM** — `get_model` **requires `prediction_length`** and rejects sub-512 contexts
+    without `force_return="zeropad"` (the old call passed neither → immediate raise). Fixed;
+    inputs are zero-padded to `model.config.context_length`; `backbone_hidden_state`
+    `(batch, n_variates, patches, d_model)` was the correct output field (signature-verified).
+  - **`scripts/verify_backbones_colab.py`** (new) is the weight-level spike the container
+    can't run: on a Colab GPU it loads each real model and runs `embed_windows` on synthetic
+    contexts, asserting shape/finiteness/non-degeneracy and exiting non-zero on any failure.
+    Final validation of these bodies (and the exact HF repo ids) is that spike, per
+    RESEARCH_PLAN §9/§11 — a backbone that still fails is reported, not forced.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from

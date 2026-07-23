@@ -120,7 +120,7 @@ def apply_noise_injection(
             f"(kind {config.dataset_kind()!r}). Perturbing real readings is out of "
             f"scope -- cover the noise axis observationally on real data instead.")
     spec = config.noise_injection
-    base = int(spec.get("seed", config.seed))
+    base = config.effective_noise_seed()   # same resolution the cache key captures (§40)
     cols = config.sensor_columns
     return (inject_noise(df_train, cols, spec, base),
             inject_noise(df_test, cols, spec, base + 1))

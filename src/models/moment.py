@@ -51,21 +51,34 @@ class MomentEmbedder(TSFMEmbedderBase):
         return self._pipeline
 
     def _encode_batch(self, batch):  # pragma: no cover -- GPU-only backbone call
+        # MOMENT-1 has a FIXED input length (config.seq_len, 512 for -large) with no
+        # auto-padding: the positional embedding is sized for it, so a raw variable-
+        # length series raises. We therefore place each channel's most-recent
+        # min(L, seq_len) cycles into a seq_len buffer and pass an input_mask marking
+        # the valid positions (the standard MOMENT contract; verified against
+        # momentfm 0.1.4). embed(reduction="mean") returns one summary vector per
+        # channel -> canonical (C, 1, d_model): a single "patch" the shared pooling
+        # collapses to (per RESEARCH_PLAN §6, MOMENT is used as a per-channel summary).
         model = self._load_pipeline()
         torch = self._torch
+        seq_len = int(model.config.seq_len)
         canonical = []
         for w in batch:
             w = np.asarray(w, np.float32)                 # (L, C)
+            take = min(w.shape[0], seq_len)
+            mask = np.zeros(seq_len, np.float32)
+            mask[:take] = 1.0
+            m = torch.as_tensor(mask, device=self._device_resolved)[None]  # (1, seq_len)
             per_channel = []
             for c in range(w.shape[1]):
-                series = torch.as_tensor(w[:, c], dtype=torch.float32,
-                                         device=self._device_resolved)[None, None, :]
+                buf = np.zeros(seq_len, np.float32)
+                buf[:take] = w[-take:, c]                 # most-recent `take` cycles
+                x = torch.as_tensor(buf, device=self._device_resolved)[None, None, :]
                 with torch.inference_mode():
-                    out = model(x_enc=series)
-                # (1, patches, d_model) encoder states -> (patches, d_model)
-                hidden = out.embeddings if hasattr(out, "embeddings") else out
-                per_channel.append(np.asarray(hidden, np.float32).reshape(
-                    -1, hidden.shape[-1]))
-            canonical.append(np.stack(per_channel, axis=0))  # (C, patches, d_model)
+                    out = model.embed(x_enc=x, input_mask=m, reduction="mean")
+                emb = np.asarray(out.embeddings.detach().to("cpu").float().numpy(),
+                                 np.float32).reshape(-1)   # (d_model,)
+                per_channel.append(emb[None, :])          # (1, d_model)
+            canonical.append(np.stack(per_channel, axis=0))  # (C, 1, d_model)
         loc_scale = self.loc_scale_from_contexts(batch)
         return canonical, loc_scale

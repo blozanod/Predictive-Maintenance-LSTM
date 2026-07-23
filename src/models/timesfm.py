@@ -37,28 +37,47 @@ class TimesFMEmbedder(TSFMEmbedderBase):
         import torch
         import timesfm  # lazy heavy import (GPU-only)
 
-        device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
-        model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(self.model_name)
-        model = model.to(device).eval() if hasattr(model, "to") else model
+        # NOTE (verified against the timesfm source): the released weights live at
+        # DEFAULT_REPO_ID "google/timesfm-2.5-200m-pytorch"; if the registry model_name
+        # is not a valid HF id the spike swaps it here. torch_compile=False keeps the
+        # eager module.forward we read hidden states from.
+        model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(
+            self.model_name, torch_compile=False)
         self._torch = torch
-        self._device_resolved = device
+        self._device_resolved = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._pipeline = model
         return self._pipeline
 
     def _encode_batch(self, batch):  # pragma: no cover -- GPU-only backbone call
+        # TimesFM 2.5 exposes NO .embed(); the transformer stack's per-patch hidden
+        # states are output_embeddings (index 1) of the underlying module's forward
+        # (verified against timesfm_2p5_torch). We patch each channel to the input patch
+        # length p (front-pad + mask), instance-normalize (RevIN, the model's own
+        # convention), and read output_embeddings (1, num_patches, model_dims).
+        # DECISION (uncited): per-series (not running-stat) normalization for embedding.
         model = self._load_pipeline()
         torch = self._torch
+        core = model.model.to(self._device_resolved).eval()   # the nn.Module
+        p = int(core.p)                                        # input patch length (32)
         canonical = []
         for w in batch:
-            w = np.asarray(w, np.float32)                 # (L, C)
+            w = np.asarray(w, np.float32)                     # (L, C)
             per_channel = []
             for c in range(w.shape[1]):
-                series = torch.as_tensor(w[:, c], dtype=torch.float32,
-                                         device=self._device_resolved)[None, :]
+                s = w[:, c]
+                pad = (-len(s)) % p
+                padded = np.concatenate([np.zeros(pad, np.float32), s])
+                is_pad = np.concatenate([np.ones(pad, bool), np.zeros(len(s), bool)])
+                mu = float(s.mean()); sigma = float(s.std()) or 1.0
+                normed = np.where(is_pad, 0.0, (padded - mu) / sigma).astype(np.float32)
+                x = torch.as_tensor(normed.reshape(-1, p),
+                                    device=self._device_resolved)[None]     # (1, np, p)
+                m = torch.as_tensor(is_pad.reshape(-1, p),
+                                    device=self._device_resolved)[None]     # (1, np, p)
                 with torch.inference_mode():
-                    hidden = model.embed(series)          # (1, patches, d_model)
-                per_channel.append(np.asarray(hidden, np.float32).reshape(
-                    -1, hidden.shape[-1]))
-            canonical.append(np.stack(per_channel, axis=0))  # (C, patches, d_model)
+                    (_, output_emb, _, _), _ = core(x, m)     # output_emb (1, np, d_model)
+                per_channel.append(np.asarray(output_emb[0].detach().to("cpu")
+                                              .float().numpy(), np.float32))
+            canonical.append(np.stack(per_channel, axis=0))   # (C, num_patches, d_model)
         loc_scale = self.loc_scale_from_contexts(batch)
         return canonical, loc_scale

@@ -419,6 +419,14 @@ class Config:
         may therefore be perturbed by ``noise_injection`` (RQ-H, sim-only)."""
         return self.dataset_kind() in SIMULATED_DATASET_KINDS
 
+    def effective_noise_seed(self) -> int:
+        """Resolved seed for the sim-only ``noise_injection`` perturbation: the noise
+        spec's own ``seed`` if given, else ``config.seed``. The single source of truth
+        used both by ``data.apply_noise_injection`` (to draw the perturbation) and by
+        the cache key (to capture it) -- so a ``config.seed`` change re-keys the
+        perturbed cache instead of silently reusing a differently-perturbed one."""
+        return int(self.noise_injection.get("seed", self.seed))
+
     def effective_condition_norm(self) -> bool:
         """Resolved condition-normalization flag: explicit value, else auto by
         dataset (ON for FD002/FD004 and XJTU-SY, OFF for FD001/FD003)."""
@@ -460,6 +468,11 @@ class Config:
         # CONDITIONALLY so every existing (unperturbed) FD001 key stays byte-identical.
         if self.noise_injection:
             d["noise_injection"] = dict(self.noise_injection)
+            # The perturbation seed defaults to config.seed, which is otherwise in NO
+            # cache key; fold the RESOLVED seed in so two configs differing only in
+            # config.seed can't collide on one differently-perturbed cache (the
+            # "cache keys are pure functions of Config" invariant, §1.2).
+            d["noise_seed"] = self.effective_noise_seed()
         if self.dataset_kind() == "xjtu":  # split protocol changes the data itself
             d["xjtu_test_bearings"] = sorted(self.xjtu_test_bearings)
             d["xjtu_test_truncation"] = self.xjtu_test_truncation
