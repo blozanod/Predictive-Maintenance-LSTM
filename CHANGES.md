@@ -994,6 +994,57 @@ No recorded result, cache key, or CSV schema changes; the FD001 keys stay byte-i
   core run (added later as optional Stage-A cells) so nothing blocks the core campaign. No
   result numbers or claims are written anywhere — no runs happen here (Task 2.5).
 
+## 46. C-MAPSS cross-TSFM campaign — recorded results (July 2026 Colab runs)
+The Tier-1 C-MAPSS campaign (§45's Stage-A × 5 + Stage-B) COMPLETED on Colab,
+2026-07-24 → 2026-07-27. Every number below is read from the completed-run CSVs on
+Drive (`pdm_tsfm/results/`): 20 per-combo `<FD00x>_<model>_results_v2.csv` (full
+grid: 5 TSFMs × FD001–FD004 × unit grid × 5 seeds × {mse, corn}; 8 baselines ×
+{native}; 2 340 deduped rows in `cross_model_data_scaling.csv`), per-combo horizon
+CSVs, `earliness.csv` + `cost_curve.csv`, and 196 figures incl. the four
+`cross_tsfm_success_map_*` heatmaps. No cells missing; no combo failed.
+
+- **Sanity gate reproduced.** FD001 `chronos-2_mlp`, full data, mse: clipped RMSE
+  **10.66** (5 seeds: 11.02/11.52/10.59/9.84/10.34) — matches the recorded §12
+  winner (10.66 ± 0.51) from the pre-refactor pipeline. The §32–§45 build did not
+  drift the recorded result.
+- **Full-data leaders (seed-mean `nasa_clipped` | clipped RMSE).** FD001:
+  Moirai-2 166 (Chronos-2 best RMSE 10.66); FD002: TimesFM 564 (TTM best RMSE
+  10.96); FD003: TimesFM 220 | 11.39; FD004: TTM 684 | 12.39. Strongest
+  competitor baseline at full data is `gbm_age` on all four (252/904/287/1020).
+  **No single TSFM dominates**; Chronos-2 is top-1 on none of the four by NASA.
+- **Success map (win-rule §36, `nasa_clipped`, paired-seed α=0.05, 130 TSFM
+  cells):** **23 win / 103 tie / 4 loss / 0 hollow**. Per model (W–L): TimesFM
+  8–0, Moirai-2 5–1, TTM 4–2, Chronos-2 3–0, MOMENT 3–1. Wins cluster on the
+  multi-condition datasets (FD002: 13 of 23) and at n_units ≥ 25; every n=2 cell
+  is a tie (5-seed pairing has no power there and nothing is usable at n=2 —
+  best-TSFM NASA is within/above the predict-mean floor on FD004). The
+  seed-MEAN of the best TSFM beats the best competitor baseline in 25/26
+  (dataset × n_units) cells — all except FD004 n=2.
+- **The 4 loss cells:** TTM FD003@50 (442 vs gbm 325), TTM & Moirai-2 FD004@10
+  (5 893/5 971 vs minirocket 3 380), MOMENT FD004@249 (1 851 vs gbm_age 1 020).
+  Scale note: tiny TTM is the FD004/FD002 full-data leader yet loses hardest in
+  low-data cells — "does scale matter" is regime-dependent, not a yes/no.
+- **CORN vs MSE (RQ-E, recorded).** At n=2, CORN's aggregate NASA is 0.3× MSE's
+  (48k vs 164k); it rescues the catastrophic low-data blowups of MOMENT/TTM/
+  Moirai (n≤5 NASA 2–6× better), while Chronos-2/TimesFM prefer MSE at n=5. On
+  clipped RMSE, CORN ≤ MSE at every n (ratio 0.92–1.00). The §7 "ordinal holds
+  where MSE explodes" claim replicates on C-MAPSS, but is model-dependent.
+- **Earliness/cost two-sided layer (recorded nuance).** At full data the TSFM
+  heads are dangerously-late slightly MORE OFTEN than gbm/lstm (e.g. FD001 frac
+  late: gbm 0.052 vs TSFMs 0.070–0.084), but with smaller magnitudes — NASA
+  (exponential in lateness) ranks TSFMs first while the LINEAR cost curve at
+  late:early = 100:1 makes gbm/lstm cheapest on 3/4 datasets. Frequency vs
+  magnitude of lateness diverge; the playbook must report both, per §8.
+- **Tier-2 roster (per `probe_roster`, `nasa_clipped` cell-and-seed mean):**
+  top-2 TSFMs = **TimesFM 2.5, Chronos-2**; top-2 foils = **gbm, minirocket**;
+  best NN = **lstm**. Caveat (recorded, not yet acted on): the mean-over-cells
+  rule is dominated by low-data blowup cells, so Moirai-2 ranks LAST among
+  TSFMs despite the best FD001 full-data NASA; a probe that targets the
+  high-data regime may want an explicit roster override.
+- **Not yet run (unchanged scope, §45):** RQ-Z zero-shot, RQ-M common-
+  representation fairness ablation, and the RQ-A/C/E(cap)/H factor probes —
+  these are the remaining C-MAPSS chapters of Milestone 2.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
