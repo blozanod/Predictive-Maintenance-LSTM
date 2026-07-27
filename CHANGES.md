@@ -1045,6 +1045,40 @@ CSVs, `earliness.csv` + `cost_curve.csv`, and 196 figures incl. the four
   representation fairness ablation, and the RQ-A/C/E(cap)/H factor probes —
   these are the remaining C-MAPSS chapters of Milestone 2.
 
+## 47. Milestone-2 completion notebooks: 3-session split (`notebooks/campaign/milestone2/`)
+Notebook-only wiring (no `src/` change) that runs the remaining C-MAPSS chapters (§46
+"not yet run" list) on the functions that already exist and pass tests
+(`run_factor_probe`, `run_representation_fairness`, `run_zeroshot`). Three notebooks =
+three parallel Colab sessions, split by backbone because the model stacks cannot share
+an environment (§42):
+
+1. **`timesfm_probes.ipynb`** — TimesFM 2.5: RQ-A/C/E/H probes **with the shared
+   baselines** (roster per §46 `probe_roster`: gbm + minirocket + lstm, + the
+   predict_mean floor) + RQ-M fairness (TimesFM).
+2. **`chronos_probes_zeroshot.ipynb`** — Chronos-2: the same probes **models-only**
+   (baselines run once, in session 1; scoring globs both files) + RQ-M fairness
+   (Chronos-2) + **RQ-Z** (`run_zeroshot`, FD001–FD004 — Chronos-2 only: it is the
+   single backbone with a registered forecaster; the four wrappers stay the §46 gap).
+3. **`fairness_moment_ttm_moirai.ipynb`** — RQ-M fairness for MOMENT/TTM/Moirai-2,
+   MODEL-parameterized, one model per runtime cycle (3 cycles; ttm/moirai keep the
+   §43/§44 restart-after-install caveat).
+
+Recorded probe decisions (result-affecting, all passed as explicit Config overrides in
+the notebooks): RQ-A `context ∈ {32, 64, 128, 192, 256}` on FD004 (the §5 anchor) +
+FD001 (the §12 finer-grid caveat; 256 = campaign cache hit); RQ-C channel subsets on
+FD001 `{all21, default14 (=FD001_NONCONSTANT_SENSORS, cache hit), top8, min4}` —
+`all21` deliberately includes the FD001-constant channels (junk-channel tolerance);
+RQ-E `max_rul ∈ {125 (cache hit), 200}` on FD001+FD004 with BOTH losses, cross-cap
+comparison via the `*_unclipped` columns only (clipped metrics are per-cap); RQ-H on
+FD001 (the §5 anchor) `{clean (cache hit), gaussian 30/20/10 dB, drift 1.0, dropout
+0.1}`; RQ-M fairness anchors FD001 + FD004 (single- vs multi-condition), native arm =
+campaign cache hit, common arm = one new pass per (model, dataset). Concurrency: every
+session writes per-session CSVs (`probe_<factor>_<tag>.csv`,
+`representation_fairness_<tag>.csv`) so no two Drive sessions ever append to one file;
+the later scoring pass (a `score.ipynb` follow-up, core runtime) globs them together
+with `cell_fields=('dataset','n_units','factor','level')`. All stages restartable; no
+result numbers recorded here — no runs happen in this change (Task 2.5).
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
