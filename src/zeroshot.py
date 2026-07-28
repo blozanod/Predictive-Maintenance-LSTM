@@ -102,9 +102,36 @@ def threshold_crossing_rul(series: np.ndarray, forecaster, threshold: float,
 # ---------------------------------------------------------------------------
 # Default (real) forecaster -- backbone load/call is the pragma boundary
 # ---------------------------------------------------------------------------
+def point_forecast_from_median(median_list, horizon: int) -> np.ndarray:
+    """First entry of ``Chronos2Pipeline.predict_quantiles``'s SECOND return value (the
+    per-series median point forecasts, each ``(n_variates, prediction_length)``) -> a
+    flat ``(horizon,)`` float64 array.
+
+    Lives ABOVE the ``# pragma: no cover`` boundary on purpose (§32: only the backbone
+    import/call is exempt; shape handling is covered by tests). Accepts torch tensors
+    (moved off GPU and up-cast, mirroring ``models/chronos.py::_encode_batch``) or plain
+    arrays, so the conversion is exercised on CPU without a backbone (CHANGES.md §49)."""
+    entry = median_list[0]
+    if hasattr(entry, "detach"):  # torch.Tensor: may be on GPU and/or bfloat16
+        entry = entry.detach().to("cpu").float().numpy()
+    flat = np.asarray(entry, np.float64).reshape(-1)[:int(horizon)]
+    if flat.size != int(horizon):
+        raise ValueError(
+            f"forecast returned {flat.size} steps, expected horizon={int(horizon)}; "
+            f"got an entry of shape {np.shape(entry)} from predict_quantiles")
+    return flat
+
+
 class ChronosForecaster:
     """Chronos-2 native forecasting wrapper (the default zero-shot forecaster). Only the
-    backbone import + ``predict`` call are GPU-only; instantiation is cheap."""
+    backbone import + ``predict_quantiles`` call are GPU-only; instantiation is cheap.
+
+    Uses ``predict_quantiles`` (NOT ``predict``): it is the API that returns a point
+    forecast. ``predict`` returns a single ``list[Tensor]`` of shape ``(n_variates,
+    n_quantiles, prediction_length)`` -- unpacking it into two names raises
+    ``ValueError: not enough values to unpack`` (CHANGES.md §49). ``predict_quantiles``
+    returns ``(quantile_list, median_list)``, and the median is the point forecast the
+    threshold-crossing step needs."""
 
     def __init__(self, config: Config, device: Optional[str] = None):
         self.config = config
@@ -112,17 +139,23 @@ class ChronosForecaster:
         self._device = device
         self._pipeline = None
 
-    def forecast(self, series, horizon: int):  # pragma: no cover -- GPU-only backbone
+    def forecast(self, series, horizon: int):
+        median_list = self._predict_median(series, int(horizon))
+        return point_forecast_from_median(median_list, int(horizon))
+
+    def _predict_median(self, series, horizon: int):  # pragma: no cover -- GPU backbone
         import torch
         from chronos import Chronos2Pipeline
         if self._pipeline is None:
             device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
             self._pipeline = Chronos2Pipeline.from_pretrained(self.model_name,
                                                               device_map=device)
+        # Each input item is (n_variates, history_length); the health index is 1 variate.
         ctx = [np.asarray(series, np.float32)[None, :]]
         with torch.inference_mode():
-            quantiles, mean = self._pipeline.predict(ctx, prediction_length=int(horizon))
-        return np.asarray(mean[0], np.float64).reshape(-1)[:horizon]
+            _quantiles, median = self._pipeline.predict_quantiles(
+                ctx, prediction_length=int(horizon))
+        return median
 
 
 # ---------------------------------------------------------------------------

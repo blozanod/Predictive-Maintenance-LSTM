@@ -152,3 +152,58 @@ def test_run_zeroshot_predictions_within_cap(tmp_path):
     assert len(z_rows) == 1
     # predictions were clipped into [0, max_rul]; metrics stay finite
     assert np.isfinite(float(z_rows[0]["rmse_clipped"]))
+
+
+class _FakeTensor:
+    """Stands in for a torch.Tensor returned by predict_quantiles: carries the
+    .detach()/.to()/.float()/.numpy() chain and a (n_variates, horizon) shape."""
+    def __init__(self, array):
+        self._a = np.asarray(array)
+        self.device = "cuda:0"
+
+    def detach(self):
+        return self
+
+    def to(self, _device):
+        self.device = _device
+        return self
+
+    def float(self):
+        return self
+
+    def numpy(self):
+        if self.device != "cpu":            # what a real CUDA tensor raises
+            raise TypeError("can't convert cuda:0 device type tensor to numpy")
+        return self._a
+
+
+def test_point_forecast_from_median_handles_torch_like_gpu_tensor():
+    """§49: the (n_variates, prediction_length) median entry flattens to (horizon,),
+    and a GPU/bf16-style tensor is moved + up-cast first (mirrors the embedder)."""
+    median = [_FakeTensor(np.arange(5, dtype=np.float32)[None, :])]   # (1, 5)
+    out = Z.point_forecast_from_median(median, horizon=5)
+    assert out.shape == (5,) and out.dtype == np.float64
+    assert np.allclose(out, [0.0, 1.0, 2.0, 3.0, 4.0])
+
+
+def test_point_forecast_from_median_accepts_plain_arrays_and_truncates():
+    """A plain array works (no torch needed) and a longer forecast is cut to horizon."""
+    out = Z.point_forecast_from_median([np.arange(8.0)[None, :]], horizon=3)
+    assert out.shape == (3,) and np.allclose(out, [0.0, 1.0, 2.0])
+
+
+def test_point_forecast_from_median_raises_on_short_forecast():
+    """Fail loud (repo contract §7) rather than silently returning a short series --
+    this is the shape check that the un-run `predict` call never had."""
+    with pytest.raises(ValueError, match="expected horizon=6"):
+        Z.point_forecast_from_median([np.arange(4.0)[None, :]], horizon=6)
+
+
+def test_chronos_forecaster_forecast_delegates_to_predict_median(monkeypatch):
+    """forecast() converts whatever _predict_median returns -- so the pure shape
+    handling is covered on CPU while only the backbone call stays pragma'd."""
+    f = Z.ChronosForecaster(Config(dataset="FD001"))
+    monkeypatch.setattr(f, "_predict_median",
+                        lambda series, horizon: [np.full((1, horizon), 2.5)])
+    out = f.forecast(np.arange(10.0), horizon=4)
+    assert out.shape == (4,) and np.allclose(out, 2.5)
