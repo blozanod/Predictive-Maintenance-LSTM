@@ -1109,6 +1109,43 @@ only fix; no `src/` change.
 - **Recovery is free:** every probe is restartable, so the interrupted session resumes and
   skips completed levels after installing the dep.
 
+## 49. RQ-Z round 1: `ChronosForecaster` called a Chronos-2 API that does not exist
+Second live failure of the §47 notebooks, this one a **real `src/` bug**, not notebook
+wiring: `run_zeroshot` raised `ValueError: not enough values to unpack (expected 2, got
+1)` at `zeroshot.py::ChronosForecaster.forecast`. Same root cause as §41 ("written from
+assumed APIs and never executed") — §41 verified the four *embedders* against their real
+libraries but **not** the zero-shot forecaster, which sat behind `# pragma: no cover` and
+so was never executed by any test either.
+
+- **The bug.** The code unpacked `Chronos2Pipeline.predict(...)` into `(quantiles, mean)`.
+  Verified against the library source: **`predict()` returns a single `list[torch.Tensor]`**,
+  each entry `(n_variates, n_quantiles, prediction_length)` — unpacking a 1-element list
+  into two names is exactly the observed error. The 2-tuple contract belongs to
+  **`predict_quantiles()`**, which returns `(quantile_list, median_list)` with medians
+  shaped `(n_variates, prediction_length)`.
+- **The fix.** `ChronosForecaster` now calls **`predict_quantiles`** and takes the median
+  as the point forecast — the right API for the threshold-crossing step, which needs a
+  point trajectory, not a quantile fan.
+- **Why it survived, and the structural fix.** §32's coverage policy says the pragma
+  covers only "the single line where a lazy backbone library is first imported"; shape
+  handling above it is meant to be mock-covered. This method violated that — the import,
+  the call, AND the tensor/shape handling were all inside one pragma'd body, so no test
+  could reach the conversion. Split accordingly: the backbone import + call moved to
+  `_predict_median` (**pragma'd, GPU-only**), while the conversion is now the module-level
+  **`point_forecast_from_median`** (**no pragma, fully tested**). It mirrors the embedder's
+  known-good `detach().to("cpu").float().numpy()` chain (GPU + bfloat16 safe — the
+  previous `np.asarray` on a CUDA tensor would have been the *next* failure) and **fails
+  loud** on a short forecast per the §7 contract, instead of silently returning a
+  truncated series.
+- **Tests (4 new, `tests/test_zeroshot.py`).** GPU/bf16-style tensor conversion via a fake
+  tensor carrying the `.detach()/.to()/.float()/.numpy()` chain; plain-array + truncation
+  path; the fail-loud short-forecast branch; and `forecast()` delegating to a patched
+  `_predict_median` so the whole conversion runs on CPU with no backbone.
+  `src/zeroshot.py` is at **100% line + branch coverage**; `pytest tests/test_zeroshot.py`
+  is green (14 tests).
+- **Scope.** RQ-Z remains **Chronos-2 only** (the other four backbones still have no
+  registered forecaster — the §46 gap is unchanged).
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
