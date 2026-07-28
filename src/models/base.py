@@ -95,6 +95,45 @@ class TSFMEmbedderBase:
             out.append(np.stack([w.mean(axis=0), w.std(axis=0)], axis=-1))  # (C, 2)
         return np.asarray(out, np.float32)
 
+    def _grouped_forward(self, items: list, shape_key, forward_fn) -> list:
+        """Run ``forward_fn`` over ``items`` in shape-homogeneous, size-capped batches
+        and return the per-item outputs in the ORIGINAL order.
+
+        The four v2 backbones are channel-independent (or per-window), so each window is
+        a handful of independent 1-D series. Embedding them one at a time (batch size 1)
+        leaves the GPU ~95% idle -- for a full C-MAPSS pass that is ~250k serial forward
+        passes. This groups the ``items`` (prepared per-series inputs) by
+        ``shape_key(item)`` (items with equal key have equal tensor shape and stack into
+        one backbone call), sub-chunks each group to ``self.batch_size`` so GPU memory
+        scales with ``batch_size`` (not the dataset), calls
+        ``forward_fn(list_of_same_shape_items) -> list_of_outputs`` (same order) once per
+        chunk, and scatters the outputs back to the input order. Because every item in a
+        chunk has an identical shape, the batched forward is exactly the batch-1 result
+        stacked -- no padding, no changed math. The backbone call lives in ``forward_fn``
+        (the ``# pragma: no cover`` boundary); this grouping/scatter is CPU-covered.
+        """
+        groups: dict = {}
+        for i, it in enumerate(items):
+            groups.setdefault(shape_key(it), []).append(i)
+        out: list = [None] * len(items)
+        for _key, idxs in groups.items():
+            for j in range(0, len(idxs), self.batch_size):
+                sub = idxs[j : j + self.batch_size]
+                for i, r in zip(sub, forward_fn([items[i] for i in sub])):
+                    out[i] = r
+        return out
+
+    @staticmethod
+    def _regroup_channels(flat: list, channels_per_window: list) -> list:
+        """Stack window-major per-channel outputs ``flat`` back into per-window
+        ``(n_variates, ...)`` canonical tensors (the inverse of the per-(window, channel)
+        flattening the univariate embedders do before ``_grouped_forward``)."""
+        canonical, k = [], 0
+        for c in channels_per_window:
+            canonical.append(np.stack(flat[k : k + c], axis=0))
+            k += c
+        return canonical
+
     def _pool_canonical(self, canonical: np.ndarray) -> np.ndarray:
         """Pool one canonical ``(n_variates, patches, d_model)`` window into the head
         feature vector, honoring ``pooling`` + ``channel_aggregation`` at this
