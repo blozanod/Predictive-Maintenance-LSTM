@@ -325,14 +325,16 @@ def plot_horizon_trajectories(
     # restart that skipped "done" cells (e.g. horizon.csv kept but predictions
     # archived) may lack seed 0 -- fall back with a note rather than crashing.
     avail_units = sorted({r["n_units"] for r in rows})
+    if not avail_units:
+        raise ValueError(f"no prediction rows in {preds_csv} (after the dataset/cap "
+                         f"selection) -- nothing to plot. Rerun the horizon eval.")
     if n_units is None:
         n_units = max(avail_units)
     elif n_units not in avail_units:
         raise ValueError(f"no predictions for n_units={n_units}; file has "
                          f"{avail_units}. Rerun the horizon eval for that unit count.")
+    # avail_units came from these rows, so the chosen count always has >=1 seed here.
     seeds_here = sorted({r["seed"] for r in rows if r["n_units"] == n_units})
-    if not seeds_here:
-        raise ValueError(f"no prediction rows for n_units={n_units}.")
     if seed not in seeds_here:
         alt = seeds_here[0]
         print(f"[plot_horizon_trajectories] seed {seed} absent for n_units="

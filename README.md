@@ -86,6 +86,16 @@ notebooks/       One notebook per dataset family, each self-cloning the repo fro
                  cache to Drive) → Stage B (score.ipynb — one core runtime, read the five
                  caches, train heads + baselines incl. catch22_gbm, emit the success map,
                  cross-model data-scaling, and earliness/cost figures).
+    milestone2/  The remaining C-MAPSS chapters (CHANGES.md §47, §51) — three parallel GPU
+                 sessions plus one core-runtime scoring pass:
+                 timesfm_probes.ipynb (RQ-A/C/E/H factor probes WITH the shared baselines
+                 + RQ-M), chronos_probes_zeroshot.ipynb (the same probes models-only +
+                 RQ-M + RQ-Z zero-shot), fairness_moment_ttm_moirai.ipynb (RQ-M for
+                 MOMENT/TTM/Moirai-2, one model per runtime cycle), and score.ipynb —
+                 the deferred scoring pass: it globs the per-session CSVs
+                 (probe_<factor>_{chronos,timesfm}.csv, representation_fairness_*.csv,
+                 zeroshot.csv), applies the win-rule, and writes the probe success map,
+                 the RQ-M fairness summary and the RQ-Z table + their figures to Drive.
 ```
 
 ## Run the tests (CPU, no download)
@@ -101,12 +111,12 @@ pytest -q
 pytest -q --cov=src --cov-branch     # .coveragerc pins fail_under=100 for src/
 ```
 
-100% line + branch coverage of `src/` is the repo gate (invariant §8). Every heavy
-backbone/dataset library is lazily imported inside a `_load_*` method the CPU tests never
-reach; the **only** sanctioned `# pragma: no cover` is that single lazy-import line
-(everything above it is covered by mocks — `tests/synthetic.py`). See `CHANGES.md` §32.
-100% is the Milestone-2 acceptance gate; Milestone 0 stands up this tooling, so until
-Milestones 1–2 finish covering every module the command reports below 100% by design.
+100% line + branch coverage of `src/` is the repo gate (invariant §8) and is **met** as of
+the Milestone-2 close-out (`CHANGES.md` §51). Every heavy backbone/dataset library is
+lazily imported inside a `_load_*` method the CPU tests never reach; the **only**
+sanctioned `# pragma: no cover` is that single lazy-import line (everything above it is
+covered by mocks — `tests/synthetic.py`). See `CHANGES.md` §32. The suite is CPU-only and
+download-free, so the gate runs anywhere `pip install -r requirements.txt` succeeds.
 
 ## Run on Colab
 
@@ -156,6 +166,26 @@ per-model **Stage A** and a single **Stage B**:
 Both stages build the **same canonical `Config`** for every cache-key field (the recorded
 §12 winner shape: `tsfm_context_length=256`, `pooling="mean"`), so Stage B finds exactly the
 caches Stage A wrote.
+
+### Milestone-2 completion (`notebooks/campaign/milestone2/`, CHANGES.md §47/§51)
+
+The remaining C-MAPSS chapters — the factor probes (RQ-A history, RQ-C channels, RQ-E label
+cap, RQ-H sim-only noise), the RQ-M common-representation fairness ablation, and the RQ-Z
+zero-shot arm — split into **three GPU sessions** (one backbone per runtime, since the stacks
+cannot share an environment) plus **one core-runtime scoring pass**:
+
+1. `timesfm_probes.ipynb` — TimesFM 2.5: every factor probe **with the shared baselines** +
+   RQ-M fairness.
+2. `chronos_probes_zeroshot.ipynb` — Chronos-2: the same probes **models-only** (the baselines
+   ran once, in session 1) + RQ-M fairness + **RQ-Z** (`run_zeroshot`, FD001–FD004).
+3. `fairness_moment_ttm_moirai.ipynb` — RQ-M fairness for MOMENT / TTM / Moirai-2, one model
+   per runtime cycle.
+4. `score.ipynb` — **one core runtime, no backbone** (`pip install -r requirements.txt`; every
+   input is a cached CSV). It globs the per-session probe CSVs together, scores them with
+   `scoring.success_map` at `cell_fields=("dataset", "n_units", "factor", "level")`, and writes
+   the probe success map + heatmaps, the RQ-M native-vs-common summary + figures, and the RQ-Z
+   floors table + figure to Drive. Every section degrades gracefully (a clear notice, not a
+   crash) when a session's CSVs are not on Drive yet.
 
 ## Audit the uncited decisions
 

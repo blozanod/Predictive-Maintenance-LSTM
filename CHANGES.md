@@ -1187,6 +1187,158 @@ The pooled embeddings are unchanged, so **no cache key, CSV, or recorded result 
 
 **Recovered onto `main` (this commit).** The fix merged into `claude/c-mapss-colab-campaign-d5yut6` (PR #17) ~51 min AFTER that branch had already merged to `main` (PR #16), and the retarget its own description called for never happened — so it sat unmerged while §45/§46's whole campaign, and the first milestone-2 sessions, ran unbatched (observed: MOMENT at **1.9 windows/s**). Cherry-picked verbatim (code identical to PR #17); only this section is renumbered 46 -> 50 to avoid colliding with §46. Caches stay valid: embeddings are byte-identical across `embed_batch_size`, so no completed work is re-embedded.
 
+## 51. Milestone-2 close-out: 100% coverage, the scoring notebook, and the §48 minirocket correction
+Closes the Milestone-2 acceptance gate (IMPLEMENTATION_PLAN §5). Three parts: the coverage
+gate reaches its recorded target, the deferred §47 scoring pass gets its notebook, and the
+§48 audit trail is corrected to match what actually ran on Colab. No cache key, CSV schema,
+or recorded result changes — the FD001 keys stay byte-identical
+(`windows_FD001_1da313c871251cec`), and no numbers are written anywhere in the repo.
+
+### (a) The coverage gate is met: `pytest -q --cov=src --cov-branch` → 100% line + branch
+Was 85.3% with 154 tests; now 100% with 229, all CPU-only, no GPU, no downloads.
+`.coveragerc` is **unchanged** (`fail_under = 100`), and the only `# pragma: no cover` in
+`src/` is still the §32 lazy-backbone-import boundary — **no pragma was added**, and no
+existing test was modified or renumbered. Six new test modules, in the established style
+(`tests/synthetic.py` fixtures + mock embedders/forecasters):
+
+- **`tests/test_plots_v1.py`** — the v1 Stage-C figures, which were the bulk of the gap
+  (`src/plots.py` 44% → 100%). `plot_ablation`; `plot_horizon` for BOTH a saturating
+  (`>= max_rul`) and a fully-closed bin arm; `plot_horizon_trajectories` (cap line, model
+  filter, a model absent from one unit, the §20 seed-fallback notice, and every guard:
+  mixed datasets, mixed label caps, an unavailable unit count, a header-only file);
+  `plot_transfer` (zero-shot reference lines, a zero-shot-only file, an empty file);
+  `plot_learning_curves` (per-loss panels, unparseable stems, the no-curves error); plus
+  the style helpers and `plot_success_map`'s explicit `condition_field`. Same contract as
+  `test_plots_v2.py`: Agg backend, tiny synthetic CSVs, `show=False`, `tmp_path` outputs,
+  assert the files exist.
+- **`tests/test_core_edges.py`** — the fail-loud guards and non-default branches of the
+  core modules: `config` validation + `num_channels` + the unknown-dataset error; `data`
+  windowing edges (every unit shorter than the window → correctly-shaped empties,
+  `pad_short=False` dropping short test units, the varlen `units=` filter); `heads`
+  (unknown-loss guards in all three entry points, a 4-layer head, `scale_targets=False`
+  decoding for mse and quantile, an unknown `corn_decoding`); `train` (non-deterministic
+  seeding, a torch whose `use_deterministic_algorithms` raises, the default-seed path);
+  `baselines` (the abstract interface, the registry's unknown-name error, the
+  no-validation NN training branch); `evaluate` (git state outside a repo, the
+  other-model/other-loss skip in `paired_seed_ttest`, a missing results file, unfiltered
+  `aggregate_data_scaling`, `archive_results_v1` idempotency, `load_learning_curve` on
+  both the step and epoch axes); and `embeddings` (the `Embedder` protocol stubs,
+  per-item and stacked-leading-axis loc/scale normalization, both fail-loud shape errors,
+  the registry-resolved Stage-A path with its throughput print, the missing-cache error,
+  and a partial npz).
+- **`tests/test_dataset_edges.py`** — the loader guards a real download can trip.
+  XJTU-SY: an empty bearing folder, a single-column snapshot, depth-1 descent giving up on
+  an unrelated tree, a partially-downloaded condition set, no condition folder at all, a
+  bearing too short to truncate, and a split that holds out every bearing. N-CMAPSS: a
+  missing and an ambiguous per-dataset file, per-file `is_available`, a dev/test unit-id
+  collision inside one file, the silent (`verbose=False`) parse and cache-hit paths, a
+  test unit too short to truncate, and the DSALL member guards (no root, fewer than two
+  files, a non-member name).
+- **`tests/test_sweep_edges.py`** — the per-baseline window override (only the named
+  baseline is re-windowed), the default baseline roster, the pre-loaded-cache entry point,
+  ablation restart safety (a rerun may add cells but never recomputes one), the empty
+  `select_best_ablation_cell` guard, `run_baseline_window_comparison` (restartable), the
+  above-fleet unit-count skip in `run_fairness_baselines`, the `HeadFeatureBuilder`
+  fit-before-transform contract and `output_dim` (asserted against the width `transform`
+  actually produces), and transfer's multi-condition warning + oversized-shot skip.
+- **`tests/test_horizon_campaign_edges.py`** — Stage A-H resolved through the model
+  registry (with its throughput print), the missing-horizon-cache error, pre-loaded
+  caches + the above-fleet skip, the §20 metrics/predictions out-of-sync guard, and the
+  campaign running a partial stage list (`horizon` + `figures`, no sweep), merging a user
+  `dataset_overrides` over the recorded defaults, and honouring the explicit `{}` opt-out
+  (XJTU-SY runs at the base protocol instead of its recorded §30 defaults).
+- **`tests/test_cache_keys.py`** — the FD001 **stable-key guard** invariant §1.2 always
+  described but which no test pinned. It asserts the recorded window and embedding keys
+  verbatim, that every v2 key field (`channel_aggregation`, `noise_injection`,
+  `noise_seed`) is ABSENT from the key dicts at its default (and present the moment it is
+  set), and that paths, `experiment_name`, Stage-B head knobs, and other families' split
+  protocols never enter an FD001 key.
+
+**Two unreachable defensive branches were made reachable** — the only `src/` changes in
+this section. Both strictly improve the error a caller sees; neither changes a working
+path, a cache key, or a result:
+- `plots.plot_horizon_trajectories` guarded "no prediction rows for n_units=…" *after*
+  deriving the available unit list from those same rows, so the guard could never fire —
+  a header-only predictions file instead died inside `max()` with
+  `max() arg is an empty sequence`. It now fails loud on the empty selection, naming the
+  file and the remedy (§7: fail loud with the observed state).
+- `embeddings.extract_loc_scale` reshaped each per-item entry to exactly
+  `(n_variates, 2)`, which made its final shape check vacuous: an entry carrying the
+  wrong variate count raised numpy's `cannot reshape array of size …` instead. Entries
+  are now reshaped to `(-1, 2)`, so the module's own
+  `loc/scale normalized to X, expected Y` message fires — the informative error the
+  check was written for. Every previously-working input is byte-identical.
+
+### (b) `notebooks/campaign/milestone2/score.ipynb` — the deferred scoring pass
+The follow-up §47 promised, in the same folder as its three session notebooks. **Core
+runtime only**: `pip install -r requirements.txt`, no backbone stack, no GPU — every input
+is a cached CSV on Drive, so no TSFM is ever loaded (`chronos-forecasting` is not even
+imported). Same setup shape as its siblings: clone the repo from GitHub → mount Drive →
+build the canonical §12-winner `Config` (`tsfm_context_length=256`, `pooling='mean'`,
+`head_features='emb+locscale'`), of which it uses only `results_dir` and the standard
+`figures_dir()` / prefix helpers. It reuses tested `src/` functions unchanged — **no
+`src/` change was needed to render any of it**.
+
+- **Factor probes (RQ-A / RQ-C / RQ-E / RQ-H).** Globs `probe_<factor>_*.csv` for
+  `factor ∈ {context, channels, label_cap, noise}` — the TimesFM and the Chronos-2 session
+  files TOGETHER, which is exactly what the per-session file split (§47) was for — and
+  scores each with `scoring.success_map` at
+  `cell_fields=('dataset', 'n_units', 'factor', 'level')`, giving win / tie / loss / hollow
+  per `(dataset, model, factor, level)` against the strongest competitor baseline in that
+  cell with the paired-seed test (`nasa_clipped` primary, `predict_mean` driving the
+  hollow guard). Emits **`probe_success_map.csv`** to the Drive results dir and one
+  `plots.plot_success_map` heatmap per factor (faceted per dataset, `show=False`,
+  `prefix='probe_<factor>_'`) to the Drive figures dir, plus a verdict tally per
+  (factor, model, loss arm).
+  **One loss arm at a time:** `win_verdict` keys cells WITHOUT `loss`, so the RQ-E
+  `label_cap` probe — the one factor that ran both `mse` and `corn` — would otherwise
+  collapse both arms onto a single `{seed: value}` map and silently score only whichever
+  row was read last. Each TSFM loss arm is therefore scored separately (the baselines,
+  always `native`, join every arm) and recorded in a `loss_arm` column; factors with a
+  single arm are unaffected.
+- **RQ-M fairness.** Reads every `representation_fairness_*.csv` present (chronos,
+  timesfm, moment, ttm, moirai), dedupes on `(dataset, model, mode, seed, loss)`, and
+  emits **`rq_m_fairness_summary.csv`** — tidy seed-mean, spread and seed count per
+  `(dataset, model, mode, channel_aggregation, metric)` for both protocol metrics — plus
+  `plots.plot_cross_tsfm` native-vs-common figures **per dataset**: FD001
+  (single-condition) and FD004 (multi-condition) are different regimes, so pooling their
+  bars would average across the very contrast the arm exists to show.
+- **RQ-Z zero-shot.** Scores `zeroshot.csv` with
+  `scoring.success_map(..., compare_to_floors=True)` in BOTH `nasa_clipped` and
+  `rmse_clipped`, and annotates each row with the seed-mean of EACH floor
+  (`predict_mean`, `cycle_reg`) and the signed margin against both — so "which floor was
+  the tougher bar" is readable per dataset, not just which one the rule selected. Emits
+  **`rq_z_summary.csv`** and one figure: the same `plot_success_map` renderer, re-labelled
+  so the rows are the two protocol metrics and the columns the four datasets.
+- **Degrades gracefully.** Every section inventories its inputs first and prints a notice
+  naming exactly what is missing — including which fairness backbones are still to come
+  from the remaining `fairness_moment_ttm_moirai.ipynb` (TTM / Moirai-2) runtime cycles —
+  instead of raising, so the notebook is useful before the campaign is fully finished and
+  can simply be re-run afterwards.
+- Every artifact lands under `<DRIVE>/results/` and `<DRIVE>/results/figures/`; per-arm
+  and per-dataset intermediates go in a `results/scoring_arms/` subfolder, and no derived
+  file is named so that the `probe_*` / `representation_fairness_*` globs could re-pick it
+  up. **Nothing is written into the repo** (invariant §1.6).
+
+### (c) Correction to §48: `minirocket` was RETAINED in the probe runs, not dropped
+§48 recorded minirocket as **DROPPED** from the probe baseline roster, leaving
+`['gbm', 'lstm', 'predict_mean']`. The completed run contradicts that record: **every**
+`probe_<factor>_timesfm.csv` on Drive carries `minirocket` rows at `loss='native'`
+alongside gbm / lstm / predict_mean, for all four factors. The audit trail is corrected
+here to match what actually ran — the shared probe baseline roster is
+**`gbm + lstm + minirocket + predict_mean`**, i.e. §47's `probe_roster` foil pair (gbm,
+minirocket) intact — and §48's roster line is superseded by this one. Nothing else in §48
+changes: the `coral-pytorch` / `lightgbm` top-up install that section exists for was the
+real fix and stands, as does the note that session 3 needs no top-up.
+Scoring is unaffected by design: the win-rule takes the STRONGEST competitor per cell, so
+an extra baseline can only make the bar tougher, never weaker, and `score.ipynb` simply
+scores whichever roster the files contain.
+
+`README.md`: the notebook layout block gains a `campaign/milestone2/` entry listing all
+four notebooks, a new "Milestone-2 completion" subsection describes the three-GPU-session
++ one-core-scoring-pass split, and the coverage-gate paragraph drops its "reports below
+100% by design" phasing note now that the gate is met.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
