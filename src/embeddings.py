@@ -152,9 +152,12 @@ def extract_loc_scale(loc_scale, batch: int, n_variates: int) -> np.ndarray:
         loc, scale = _to_numpy(loc_scale[0]), _to_numpy(loc_scale[1])
         arr = np.stack([loc.reshape(batch, n_variates),
                         scale.reshape(batch, n_variates)], axis=-1)
-    # Per-item sequence: one (n_variates, 2) / (n_variates,)x2 entry per window.
+    # Per-item sequence: one (n_variates, 2) / (n_variates,)x2 entry per window. Each
+    # entry is reshaped to (-1, 2) rather than (n_variates, 2) so an entry carrying the
+    # WRONG number of variates surfaces in the shape check below with this module's
+    # message, instead of numpy's cryptic "cannot reshape array of size ..." (§51).
     elif is_seq and len(loc_scale) == batch:
-        arr = np.stack([_to_numpy(x).reshape(n_variates, 2) for x in loc_scale], axis=0)
+        arr = np.stack([_to_numpy(x).reshape(-1, 2) for x in loc_scale], axis=0)
     else:
         arr = _to_numpy(loc_scale)
         if arr.shape[-1] == 2:                       # (..., 2)
