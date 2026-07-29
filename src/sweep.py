@@ -237,6 +237,120 @@ def run_sweep(
 
 
 # ---------------------------------------------------------------------------
+# The censored / alarm sweep (RESEARCH_PLAN §4, §8; CHANGES.md §54)
+# ---------------------------------------------------------------------------
+def alarm_labels_from_rul(rul, config: Config) -> np.ndarray:
+    """Binary ``failure_within_horizon`` label read off a cached RUL array. The single
+    conversion used by BOTH the head (via ``heads.alarm_targets``) and the alarm
+    baselines, so the two arms can never disagree about the target. Valid because
+    ``Config`` enforces ``alarm_horizon < max_rul`` (clipping cannot erase the
+    distinction) and because the rows whose label is unknowable were dropped before
+    windowing (``data.add_alarm_label``)."""
+    return (np.asarray(rul, np.float64) <= float(config.alarm_horizon)).astype(np.float64)
+
+
+def _alarm_row(config: Config, model: str, n_units: int, seed: int, loss: str,
+               y_true_binary, y_prob, rul_true, baseline_window: object = "") -> dict:
+    """One row of the ALARM results CSV: identity + provenance + the alarm metric block.
+
+    Deliberately a separate assembler (and a separate file) from ``_row``: the alarm
+    columns are disjoint from the RUL ones, so the two can never be silently averaged
+    or plotted on one axis -- the non-comparability discipline RESEARCH_PLAN §8 demands
+    for censored datasets, enforced structurally rather than by convention."""
+    from .evaluate import evaluate_alarm_predictions
+    metrics = evaluate_alarm_predictions(y_true_binary, y_prob, rul_true,
+                                         config.alarm_threshold)
+    return {
+        "schema_version": RESULTS_SCHEMA_VERSION,
+        "model": model, "n_units": int(n_units), "seed": int(seed), "loss": loss,
+        "dataset": config.dataset, "alarm_horizon": int(config.alarm_horizon),
+        "max_rul": config.max_rul, "window_size": config.window_size,
+        "tsfm_context_length": config.effective_tsfm_context(),
+        "head_features": config.head_features, "pooling": config.pooling,
+        "baseline_window": baseline_window,
+        **metrics,
+    }
+
+
+def run_alarm_sweep(
+    config: Config,
+    cache: Optional[dict] = None,
+    results_csv: Optional[str | Path] = None,
+    run_dir: Optional[str | Path] = None,
+    baseline_names: Optional[list[str]] = None,
+    device: str = "cpu",
+) -> Path:
+    """The censored fleets' data-scaling sweep: the TSFM head's binary alarm arm plus
+    the alarm baselines, over the standard (n_units x seed) grid.
+
+    Writes ``alarm_results.csv`` -- a DIFFERENT file from ``results_v2.csv`` -- because
+    the alarm metric block shares no columns with the RUL one (§54). Restartable on the
+    same ``CELL_KEYS``. Requires ``config.alarm_horizon``; raises otherwise, since
+    without a horizon there is no question to answer."""
+    from .embeddings import load_embedding_cache
+    from . import heads as heads_mod
+
+    if config.alarm_horizon is None:
+        raise ValueError(
+            "run_alarm_sweep requires config.alarm_horizon (the censoring-aware target, "
+            "RESEARCH_PLAN §4). Run the RUL sweep (run_sweep) for run-to-failure "
+            "datasets instead.")
+    if cache is None:
+        cache = load_embedding_cache(config)
+    run_dir = Path(run_dir) if run_dir else config.results_path("alarm_runs")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    results_csv = (Path(results_csv) if results_csv
+                   else config.results_path("alarm_results.csv"))
+    save_run_metadata(config, run_dir / "run_metadata.json")
+    if baseline_names is None:
+        baseline_names = ["alarm_base_rate", "alarm_gbm"]
+    unknown = set(baseline_names) - set(baselines_mod.ALARM_BASELINES)
+    if unknown:
+        raise ValueError(
+            f"run_alarm_sweep takes ALARM baselines (probability emitters); got "
+            f"{sorted(unknown)}. Choices: {sorted(baselines_mod.ALARM_BASELINES)}.")
+
+    loss = heads_mod.ALARM_LOSS
+    model_tag = config.model_name.split("/")[-1] + "_mlp"
+    dc = _to_device_cache(cache, device)
+    tr_u = dc["tr_u"]
+    all_units = np.unique(tr_u)
+    # Binary targets for the baselines (the head derives its own from the RUL tensor).
+    tr_binary = alarm_labels_from_rul(cache["train_labels"], config)
+    te_rul = np.asarray(cache["test_labels"], np.float64)
+    te_binary = alarm_labels_from_rul(te_rul, config)
+    done = completed_cells(results_csv, CELL_KEYS)
+
+    for n_units in resolve_unit_counts(config.data_unit_counts, len(all_units)):
+        for seed in config.sweep_seeds:
+            sampled = data_mod.subsample_units(all_units, n_units, seed)
+            train_u, val_u = data_mod.unit_train_val_split(sampled, config.val_fraction, seed)
+            _save_sampled_units(run_dir, n_units, seed, sampled, train_u, val_u)
+            tr_mask, va_mask = np.isin(tr_u, train_u), np.isin(tr_u, val_u)
+
+            key = (model_tag, config.dataset, str(n_units), str(seed), loss)
+            if key not in done:
+                prob = _fit_predict_tsfm(config, dc, tr_mask, va_mask, loss, seed, device)
+                append_result_row(results_csv, _alarm_row(
+                    config, model_tag, n_units, seed, loss, te_binary, prob, te_rul))
+                done.add(key)
+
+            for bname in baseline_names:
+                bkey = (bname, config.dataset, str(n_units), str(seed), "native")
+                if bkey in done:
+                    continue
+                bl = baselines_mod.make_baseline(bname, config, seed=seed)
+                bl.fit(cache["train_windows"][tr_mask], tr_binary[tr_mask],
+                       cache["train_windows"][va_mask], tr_binary[va_mask])
+                prob = bl.predict(cache["test_windows"])
+                append_result_row(results_csv, _alarm_row(
+                    config, bname, n_units, seed, "native", te_binary, prob, te_rul,
+                    baseline_window=config.window_size))
+                done.add(bkey)
+    return results_csv
+
+
+# ---------------------------------------------------------------------------
 # Ablation (Task 1.5): pick the winning (context, features, pooling) cell
 # ---------------------------------------------------------------------------
 def run_ablation(

@@ -117,10 +117,159 @@ NCMAPSS_DATASETS = ("DS01", "DS02", "DS03", "DS04", "DS05", "DS06", "DS07",
 NCMAPSS_W_VARS = ("alt", "Mach", "TRA", "T2")
 NCMAPSS_XS_VARS = ("T24", "T30", "T48", "T50", "P15", "P2", "P21", "P24",
                    "Ps30", "P40", "P50", "Nf", "Nc", "Wf")
-NCMAPSS_FEATURE_COLUMNS = (
-    [f"{v}_{s}" for v in NCMAPSS_W_VARS + NCMAPSS_XS_VARS for s in ("mean", "std")]
-    + ["cycle_len_s"]
+
+# Per-cycle statistic SETS for the N-CMAPSS aggregation knob (RQ-G, CHANGES.md §53).
+# "mean_std" is the historical default (37 channels: mean+std of the 18 raw channels
+# plus cycle_len_s) and MUST stay first-listed/byte-identical. "mean_std_minmax_slope"
+# is the richer arm: does a finer per-cycle summary buy anything, or is mean+std all a
+# TSFM needs from a 1 Hz flight? DECISION (uncited): the two stat sets and the linear
+# least-squares slope over the flight's 1 Hz rows (per-second units).
+NCMAPSS_AGG_STAT_SETS = {
+    "mean_std": ("mean", "std"),
+    "mean_std_minmax_slope": ("mean", "std", "min", "max", "slope"),
+}
+
+
+def ncmapss_feature_columns(agg_stats: str = "mean_std") -> list:
+    """Per-cycle channel names for an N-CMAPSS aggregation stat set: every raw channel
+    x every statistic, plus the observable flight duration ``cycle_len_s``."""
+    stats = NCMAPSS_AGG_STAT_SETS[agg_stats]
+    return ([f"{v}_{s}" for v in NCMAPSS_W_VARS + NCMAPSS_XS_VARS for s in stats]
+            + ["cycle_len_s"])
+
+
+NCMAPSS_FEATURE_COLUMNS = ncmapss_feature_columns("mean_std")
+
+# ---------------------------------------------------------------------------
+# MetroPT-3 (UCI 791; Veloso et al. 2022) -- REAL industrial, CENSORED (§54)
+# Porto Metro train Air Production Unit. One flat CSV, 15 sensor signals logged by an
+# onboard device (nominally 1 Hz, SHIPPED decimated to ~10 s and irregular), Feb-Sep
+# 2020, with FOUR documented air-leak events supplied out-of-band -- the file itself
+# carries no label column. Column names/order below are the file's verbatim header
+# (including its misspelling ``DV_eletric``); a mismatch fails loud at load.
+# ---------------------------------------------------------------------------
+METROPT_DATASETS = ("MetroPT-3",)
+METROPT_ANALOG_COLUMNS = ("TP2", "TP3", "H1", "DV_pressure", "Reservoirs",
+                          "Oil_temperature", "Motor_current")
+# NOTE: 'DV_eletric' is spelled that way IN THE FILE (missing the 'c') -- do not "fix".
+METROPT_DIGITAL_COLUMNS = ("COMP", "DV_eletric", "Towers", "MPG", "LPS",
+                           "Pressure_switch", "Oil_level", "Caudal_impulses")
+METROPT_SIGNAL_COLUMNS = METROPT_ANALOG_COLUMNS + METROPT_DIGITAL_COLUMNS
+METROPT_TIMESTAMP_COLUMN = "timestamp"
+
+# The shipped file's NOMINAL cadence in seconds. The stream is acquired at 1 Hz but
+# SHIPPED decimated ~10x and irregular (10 s x1.34M, 9 s x128k, 12 s x38k). It is the
+# reference a bin's expected row count is computed from, so the coverage test
+# (metropt_min_bin_coverage) is invariant under the metropt_cycle_minutes sweep.
+METROPT_NOMINAL_CADENCE_S = 10.0
+
+
+def metropt_feature_columns() -> list:
+    """Per-cycle channels: mean+std of each ANALOG signal (its level and its within-bin
+    variability) plus the duty fraction of each DIGITAL signal -- for a binary channel
+    the mean IS the fraction of the bin it was active, and a std adds nothing beyond it.
+    DECISION (uncited), CHANGES.md §54."""
+    return ([f"{c}_{s}" for c in METROPT_ANALOG_COLUMNS for s in ("mean", "std")]
+            + [f"{c}_duty" for c in METROPT_DIGITAL_COLUMNS])
+
+
+METROPT_FEATURE_COLUMNS = metropt_feature_columns()
+
+# The four documented air-leak events (UCI "Failure Information" table, normalized to
+# ISO from its published US M/D/YYYY H:MM form). The table's own numbering is typo'd
+# (#1, #1, #3, #4) and its row-2 report says "30Apr" for a 29-30 MAY failure; both are
+# recorded here as they were published and corrected only in this comment.
+# DECISION (uncited): we take the UCI 4-event table as ground truth rather than the
+# finer 21-window list in Davari et al. (DSAA 2021), because the UCI table is what the
+# dataset itself ships and is what the prediction target ("time to the next documented
+# intervention", RESEARCH_PLAN §4) is defined against. CHANGES.md §54.
+METROPT_FAILURE_EVENTS = (
+    {"event": 1, "start": "2020-04-18 00:00:00", "end": "2020-04-18 23:59:59",
+     "failure": "Air leak", "severity": "High stress"},
+    {"event": 2, "start": "2020-05-29 23:30:00", "end": "2020-05-30 06:00:00",
+     "failure": "Air leak", "severity": "High stress"},
+    {"event": 3, "start": "2020-06-05 10:00:00", "end": "2020-06-07 14:30:00",
+     "failure": "Air leak", "severity": "High stress"},
+    {"event": 4, "start": "2020-07-15 14:30:00", "end": "2020-07-15 19:00:00",
+     "failure": "Air leak", "severity": "High stress"},
 )
+
+# ---------------------------------------------------------------------------
+# UCI "Condition monitoring of hydraulic systems" (UCI 447; Helwig et al. 2015)
+# REAL test rig; the RQ-F adjust-vs-replace anchor (native GRADED severity per cycle).
+# 2205 cycles x 17 tab-delimited, header-less sensor files; row i of every file is
+# cycle i (positional alignment ONLY -- there is no join key).
+# ---------------------------------------------------------------------------
+HYDRAULIC_DATASETS = ("Hydraulic",)
+# sensor name -> (samples per 60 s cycle, unit). Verified byte-level against the shipped
+# files: 7 files at 100 Hz, 2 at 10 Hz, 8 at 1 Hz; 43680 attributes per cycle in total.
+HYDRAULIC_SENSORS = {
+    "PS1": (6000, "bar"), "PS2": (6000, "bar"), "PS3": (6000, "bar"),
+    "PS4": (6000, "bar"), "PS5": (6000, "bar"), "PS6": (6000, "bar"),
+    "EPS1": (6000, "W"),
+    "FS1": (600, "l/min"), "FS2": (600, "l/min"),
+    "TS1": (60, "degC"), "TS2": (60, "degC"), "TS3": (60, "degC"), "TS4": (60, "degC"),
+    "VS1": (60, "mm/s"), "CE": (60, "%"), "CP": (60, "kW"), "SE": (60, "%"),
+}
+HYDRAULIC_SENSOR_NAMES = tuple(HYDRAULIC_SENSORS)
+HYDRAULIC_N_CYCLES = 2205          # asserted at load (fail loud on a truncated download)
+HYDRAULIC_PROFILE_FILE = "profile.txt"
+
+# profile.txt's 5 integer columns, in file order, with each component's value set
+# ordered HEALTHY -> WORST. The raw value sets run in different directions (cooler and
+# valve and accumulator are "% / bar, higher = healthier"; pump leakage is an index
+# where higher = worse), so the loader maps every component onto ONE polarity:
+# severity 0 = healthy, higher = worse. Not assuming a global polarity is the whole
+# point -- getting it backwards would invert the RQ-F labels.
+HYDRAULIC_PROFILE_COLUMNS = ("cooler", "valve", "pump", "accumulator", "stable_flag")
+HYDRAULIC_SEVERITY_ORDER = {
+    "cooler": (100, 20, 3),            # % efficiency: full -> reduced -> near failure
+    "valve": (100, 90, 80, 73),        # % switching: optimal -> lag -> severe -> near failure
+    "pump": (0, 1, 2),                 # leakage index: none -> weak -> severe
+    "accumulator": (130, 115, 100, 90),  # bar pre-charge: optimal -> ... -> near failure
+}
+HYDRAULIC_COMPONENTS = tuple(HYDRAULIC_SEVERITY_ORDER)
+# The RQ-F action taxonomy (RESEARCH_PLAN §2 RQ-F / §4). DECISION (uncited): severity 0
+# is "none" (healthy), the WORST severity level of a component is "replace" (a terminal
+# fault: a part must be swapped), and every intermediate level is "adjust" (a minor or
+# self-correcting fault a technician tunes out). This is the only mapping the dataset's
+# own severity ladder supports without inventing thresholds, and it makes the classes
+# comparable across components whose ladders have different lengths.
+HYDRAULIC_ACTIONS = ("none", "adjust", "replace")
+
+
+def hydraulic_feature_columns(agg_stats: str = "mean_std") -> list:
+    """Per-cycle channels: the chosen statistics of each sensor's intra-cycle samples.
+    One row of every sensor file IS one 60 s cycle, so this is the same cycle-aggregation
+    device N-CMAPSS uses (§27) -- and it is what makes the three sampling rates
+    (100/10/1 Hz) commensurable without resampling anything."""
+    stats = NCMAPSS_AGG_STAT_SETS[agg_stats]
+    return [f"{s}_{stat}" for s in HYDRAULIC_SENSOR_NAMES for stat in stats]
+
+
+HYDRAULIC_FEATURE_COLUMNS = hydraulic_feature_columns("mean_std")
+
+# ---------------------------------------------------------------------------
+# Backblaze Drive Stats -- REAL industrial, fleet-scale, CENSORED (§56)
+# Daily SMART snapshots per drive. ``failure=1`` marks a drive's LAST operational day;
+# a drive that simply stops appearing (retired/migrated) is RIGHT-CENSORED, not failed.
+# ---------------------------------------------------------------------------
+BACKBLAZE_DATASETS = ("Backblaze",)
+BACKBLAZE_META_COLUMNS = ("date", "serial_number", "model", "capacity_bytes", "failure")
+# DECISION (uncited): the default SMART set is the five attributes Backblaze itself
+# calls out as failure-predictive (5, 187, 188, 197, 198) plus power-on hours (9, the
+# age covariate) and temperature (194) -- restricted to RAW values, which are the
+# physically-meaningful counts. Normalized values are vendor-rescaled and not comparable
+# across models. Which of these a model actually populates VARIES BY MODEL (187/188 are
+# absent on several) -- that is itself the RQ-C "what can you even record?" question at
+# fleet scale, so the set is a config field, not a constant.
+BACKBLAZE_DEFAULT_SMART = ("smart_5_raw", "smart_9_raw", "smart_187_raw",
+                           "smart_188_raw", "smart_194_raw", "smart_197_raw",
+                           "smart_198_raw")
+# DECISION (uncited): default scope is two high-volume, long-lived HDD models with good
+# SMART coverage. Restricting the fleet controls the model-heterogeneity confound
+# (RESEARCH_PLAN §11) and keeps the parse tractable; override per experiment.
+BACKBLAZE_DEFAULT_MODELS = ("ST12000NM0008", "HGST HMS5C4040ALE640")
 
 # Rounding (decimals per setting column) used to snap the 3 operational settings
 # onto their discrete condition grid before grouping: altitude wobbles ~0.008
@@ -136,6 +285,35 @@ XJTU_BASE_FEATURES = ("rms", "kurtosis", "skewness", "peak", "p2p",
                       "crest", "impulse", "shape")
 XJTU_FEATURE_COLUMNS = [f"{ax}_{f}" for ax in ("h", "v") for f in XJTU_BASE_FEATURES]
 
+# XJTU-SY feature MODE (RQ-D, CHANGES.md §52): how one 25.6 kHz / 32768-sample
+# snapshot becomes model channels. "indicators" = the 16 hand-crafted condition
+# indicators above (the historical default, byte-identical keys); "raw" = the
+# snapshot's own SAMPLES reduced to a fixed width (a collection choice: what you
+# would have recorded at a lower rate / coarser aggregation -- never a mutation of a
+# kept value); "raw+indicators" = both. This is the direct test of "do TSFMs make
+# hand-crafted condition indicators obsolete?" (RESEARCH_PLAN §2 RQ-D).
+XJTU_FEATURE_MODES = ("indicators", "raw", "raw+indicators")
+
+# How the 32768 samples of one snapshot are reduced to ``xjtu_raw_channels`` values
+# per axis (DECISION (uncited), CHANGES.md §52):
+#   * "decimate"    -- keep that many evenly-spaced RAW SAMPLES (IMPLEMENTATION_PLAN
+#     §6.1's "fixed decimation of the 32768 samples"). Subtractive in the strictest
+#     sense: every emitted number is a reading that was actually taken. It is exactly
+#     what a practitioner who sampled at the corresponding lower rate would hold.
+#   * "segment_rms" -- RMS within each of that many contiguous, equal segments. Keeps
+#     the FULL-RATE energy of the snapshot while coarsening time resolution, i.e. the
+#     aggregation-coarsening intervention (RQ-G on XJTU, RESEARCH_PLAN §5).
+# Running both separates "the TSFM lost because of the sampling RATE" from "...because
+# of the REPRESENTATION" -- the two are confounded under decimation alone.
+XJTU_RAW_REDUCTIONS = ("decimate", "segment_rms")
+
+
+def xjtu_raw_columns(n_per_axis: int) -> list:
+    """Raw-sample channel names for the XJTU ``raw`` modes: ``h_raw_0..`` /
+    ``v_raw_0..``, ``n_per_axis`` per accelerometer axis (2 * n total)."""
+    return [f"{ax}_raw_{i}" for ax in ("h", "v") for i in range(n_per_axis)]
+
+
 # Default sensor channels per dataset KIND, applied when config.sensor_columns is
 # left None -- switching datasets is one knob, no cryptic KeyError deep in
 # preprocessing (CHANGES.md §24). Values match the previously-required explicit
@@ -144,7 +322,31 @@ DEFAULT_SENSOR_COLUMNS = {
     "cmapss": list(FD001_NONCONSTANT_SENSORS),
     "xjtu": list(XJTU_FEATURE_COLUMNS),
     "ncmapss": list(NCMAPSS_FEATURE_COLUMNS),
+    "metropt": list(METROPT_FEATURE_COLUMNS),
+    "hydraulic": list(HYDRAULIC_FEATURE_COLUMNS),
+    "backblaze": list(BACKBLAZE_DEFAULT_SMART),
 }
+
+# Dataset families whose fleets are MOSTLY HEALTHY: rare observed failures plus many
+# right-censored survivors (RESEARCH_PLAN §4). Their loaders emit the
+# ``event_observed`` column, they are scored with the alarm/lead-time metric rather
+# than the NASA score, and their numbers are never tabled against the run-to-failure
+# datasets' (CHANGES.md §54).
+CENSORED_DATASET_KINDS = ("metropt", "backblaze")
+
+# Dataset families that contain NO failure events at all, so neither a RUL nor an alarm
+# target is meaningful for them: the UCI hydraulic rig is a cyclic controlled-fault
+# INJECTION experiment, where a "unit" (a constant-fault label block) ends because the
+# experimenter changed the set-point, not because anything degraded or failed. Its
+# time-to-event targets are therefore degenerate BY CONSTRUCTION -- on the real record
+# every block is the same length, so `rul_truth` comes out a constant and the
+# predict-the-mean floor scores a perfect 0.0 RMSE that no model can beat.
+#
+# Rather than table that meaningless number next to C-MAPSS's, the campaign runs these
+# datasets for their ACTUAL deliverable: the RQ-F few-shot taxonomy probe
+# (src/taxonomy.py). Their loaders emit `event_observed = 0` everywhere -- literally
+# true: no block ends in an observed failure (CHANGES.md §55).
+CLASSIFICATION_DATASET_KINDS = ("hydraulic",)
 
 
 @dataclass
@@ -188,12 +390,102 @@ class Config:
         "Bearing3_4", "Bearing3_5"])
     xjtu_test_truncation: float = 0.6
 
+    # ---- XJTU-SY feature mode: raw-vs-indicators (RQ-D; CHANGES.md §52) ------
+    # How one 25.6 kHz snapshot becomes model channels (XJTU_FEATURE_MODES):
+    # "indicators" (default, the historical 16 hand-crafted channels -- keys unchanged),
+    # "raw" (2 * xjtu_raw_channels reduced sample channels), or "raw+indicators".
+    # The three fields join the window key ONLY when the mode is not "indicators",
+    # so every recorded XJTU key is byte-identical. xjtu-only (like the split fields).
+    xjtu_feature_mode: str = "indicators"
+    # Raw channels emitted PER AXIS (total = 2x this). DECISION (uncited): 16 keeps the
+    # raw arm's channel count (32) in the same order as the indicator arm's (16), so the
+    # comparison is not confounded by a 1000x wider input; sweep it for RQ-G.
+    xjtu_raw_channels: int = 16
+    # How samples are reduced to those channels (XJTU_RAW_REDUCTIONS).
+    xjtu_raw_reduce: str = "decimate"
+
     # ---- N-CMAPSS split protocol (ignored for C-MAPSS/XJTU; CHANGES.md §27-28) --
     # The file's own *_test units are run-to-failure (RUL hits 0 at the last row); to
     # match the pipeline's predict-at-last-observed-cycle protocol each test unit is
     # truncated at this life fraction (same device as XJTU, §22). ncmapss-only cache-
     # key field. DECISION (uncited): 0.6 mirrors the XJTU default; no community standard.
     ncmapss_test_truncation: float = 0.6
+    # ---- N-CMAPSS aggregation granularity (RQ-G; CHANGES.md §53) ------------
+    # How the 1 Hz WITHIN-flight rows are reduced to one cycle row. Both are
+    # ncmapss-only cache-key fields, added ONLY when non-default (existing keys
+    # byte-identical), and both also key the per-file AGGREGATE cache.
+    # ``ncmapss_agg_stride`` sub-samples each flight's rows 1-in-N BEFORE aggregating
+    # (the "how finely must you sample?" intervention: stride 10 means a 0.1 Hz
+    # recorder). ``ncmapss_agg_stats`` selects the per-cycle statistic set
+    # (NCMAPSS_AGG_STAT_SETS): "mean_std" (default, 37 channels) or the richer
+    # "mean_std_minmax_slope" (91 channels).
+    ncmapss_agg_stride: int = 1
+    ncmapss_agg_stats: str = "mean_std"
+    # ---- MetroPT-3 protocol (CHANGES.md §54) --------------------------------
+    # The 1 Hz-ish irregular stream is binned into fixed-duration "cycles"; this is the
+    # bin width in MINUTES and is the dataset's RQ-G sampling/aggregation lever.
+    # DECISION (uncited): 60 min gives ~5100 cycles over the 7-month record -- enough
+    # per-run history for a 30-cycle window while keeping each bin densely populated
+    # (~360 raw samples at the shipped ~10 s cadence).
+    metropt_cycle_minutes: int = 60
+    # A bin with fewer than this many raw samples is DROPPED rather than aggregated:
+    # ~17.6% of wall-clock time is missing from the shipped file with no gap marker, so
+    # a sparsely-covered bin's mean/std would be a different quantity from a full bin's.
+    # This is the ABSOLUTE floor; the scale-invariant test below usually binds first.
+    metropt_min_samples_per_cycle: int = 10
+    # Minimum fraction of a bin's wall-clock time that must actually be covered by rows,
+    # at the nominal ~10 s shipped cadence (METROPT_NOMINAL_CADENCE_S). A bin is kept
+    # only if it holds BOTH >= metropt_min_samples_per_cycle rows AND >= this fraction of
+    # the rows a fully-covered bin would hold.
+    #
+    # Why a FRACTION and not just a count: metropt_cycle_minutes is this dataset's RQ-G
+    # sweep lever, so an absolute floor makes the data-quality filter ~140x stricter at
+    # 10-minute bins than at 1440-minute ones -- the aggregation-granularity comparison
+    # would then be confounded by a coverage gradient instead of being apples-to-apples.
+    # DECISION (uncited): 0.5 keeps any bin at least half covered, which at the 60-minute
+    # default drops the badly-holed bins while retaining the typical ~82%-covered one.
+    metropt_min_bin_coverage: float = 0.5
+    # Which intervention runs are held out for test (1-based, in chronological order;
+    # run k ends at documented event k). DECISION (uncited): run 4 (the July air leak)
+    # is the last run that ends in an OBSERVED event, so it is the only choice that
+    # gives the test split a real failure to predict; the censored tail run stays in
+    # train, where it legitimately contributes alarm-negative rows.
+    metropt_test_runs: list = field(default_factory=lambda: [4])
+    metropt_test_truncation: float = 0.6   # same predict-at-last-observed-cycle device
+
+    # ---- UCI Hydraulic protocol (CHANGES.md §55) ----------------------------
+    # Drop the settling cycles the rig flags as not-yet-stable. NOTE the polarity: the
+    # shipped column is 1 = NOT stable. DECISION (uncited): dropping them is the
+    # standard preprocessing and leaves a near-perfect factorial design.
+    hydraulic_drop_unstable: bool = True
+    # Which component's action label the RQ-F probe targets (HYDRAULIC_COMPONENTS).
+    hydraulic_taxonomy_component: str = "valve"
+    # Per-cycle statistic set over each sensor's intra-cycle samples (NCMAPSS_AGG_STAT_SETS).
+    hydraulic_agg_stats: str = "mean_std"
+    hydraulic_test_fraction: float = 0.3   # unit(=label-block)-level held-out fraction
+
+    # ---- Backblaze protocol (CHANGES.md §56) --------------------------------
+    # Scope control (RESEARCH_PLAN §11): restrict the fleet to a few high-volume drive
+    # models so SMART availability and failure physics are comparable across units.
+    backblaze_models: list = field(
+        default_factory=lambda: list(BACKBLAZE_DEFAULT_MODELS))
+    # Which SMART columns become model channels. Selecting BY NAME (never by position)
+    # is mandatory: the daily CSV's column count drifts across quarters and new SMART
+    # columns are INSERTED in ascending attribute order, not appended.
+    backblaze_smart_columns: list = field(
+        default_factory=lambda: list(BACKBLAZE_DEFAULT_SMART))
+    # Optional inclusive date bounds ("YYYY-MM-DD") over the daily snapshots.
+    backblaze_start_date: Optional[str] = None
+    backblaze_end_date: Optional[str] = None
+    # Drives with fewer than this many observed days carry too little history to window.
+    backblaze_min_days: int = 40
+    # DECISION (uncited): cap the CENSORED survivors kept per model. The fleet is ~1 in
+    # 23,500 drive-days a failure; keeping every survivor makes Stage A dominated by
+    # drives that never fail while adding little signal. Every FAILED drive is always
+    # kept -- only survivors are subsampled, seeded and recorded. None => keep all.
+    backblaze_max_survivors_per_model: Optional[int] = 200
+    backblaze_test_fraction: float = 0.3   # drive-level held-out fraction
+
     # DSALL member list (§28): which per-file DS0x datasets the combined fleet unions.
     # None => whatever N-CMAPSS_DS*.h5 is on disk at load time (keyed "auto" -- for
     # exploration only). Set an explicit list for reproducible runs (the campaign does,
@@ -269,8 +561,28 @@ class Config:
     head_dropout: float = 0.1  # DECISION (uncited): standard light regularization for the head
     head_num_layers: int = 2
 
+    # ---- censoring & the alarm target (RESEARCH_PLAN §4; CHANGES.md §54) ----
+    # Real fleets (MetroPT, Backblaze) are MOSTLY HEALTHY: rare failures plus many
+    # right-censored survivors, so forcing a RUL regression on every unit invents a
+    # failure date the data does not contain. ``alarm_horizon`` switches on the
+    # censoring-aware target: "will this unit reach an intervention within H cycles?",
+    # a binary label every censored survivor can still legitimately contribute a 0 to
+    # (as long as it was observed for the whole horizon -- see data.add_alarm_label,
+    # which leaves the genuinely unknown rows NaN and drops them rather than guessing).
+    # None => pure RUL (every run-to-failure dataset; unchanged behaviour). Because it
+    # changes the LABEL, it is a window-cache-key field -- added ONLY when set, so every
+    # existing key is byte-identical. Must be < max_rul (a horizon at or beyond the
+    # clip point is invisible after clipping); validated below.
+    alarm_horizon: Optional[int] = None
+    # Probability threshold at which an alarm is declared when scoring the binary arm
+    # (evaluate.alarm_metrics). DECISION (uncited): 0.5 is the neutral default; the
+    # threshold SWEEP (alarm_threshold_sweep) is the real deliverable, exactly as the
+    # cost curve is for the RUL arms -- no single arbitrary operating point.
+    alarm_threshold: float = 0.5
+
     # ---- losses ------------------------------------------------------------
-    # Phase-1 loss arms. "quantile" is the optional third arm (RESEARCH_PLAN sec.5).
+    # Phase-1 loss arms. "quantile" is the optional third arm (RESEARCH_PLAN sec.5);
+    # "failure_within_horizon" is the censored/alarm arm (requires alarm_horizon).
     losses: list = field(default_factory=lambda: ["mse", "corn"])
     # Ordinal binning for CORN: K ordered bins over [0, max_rul]. K=25 => width 5
     # cycles after clipping at 125 (RESEARCH_PLAN sec.5). CORN: Shi, Cao & Raschka
@@ -362,6 +674,55 @@ class Config:
             raise ValueError(
                 f"channel_aggregation must be one of {CHANNEL_AGGREGATION_CHOICES}, "
                 f"got {self.channel_aggregation!r}")
+        if self.xjtu_feature_mode not in XJTU_FEATURE_MODES:
+            raise ValueError(
+                f"xjtu_feature_mode must be one of {XJTU_FEATURE_MODES}, "
+                f"got {self.xjtu_feature_mode!r}")
+        if self.xjtu_raw_reduce not in XJTU_RAW_REDUCTIONS:
+            raise ValueError(
+                f"xjtu_raw_reduce must be one of {XJTU_RAW_REDUCTIONS}, "
+                f"got {self.xjtu_raw_reduce!r}")
+        if self.xjtu_raw_channels < 1:
+            raise ValueError(
+                f"xjtu_raw_channels must be >= 1, got {self.xjtu_raw_channels}")
+        if self.ncmapss_agg_stats not in NCMAPSS_AGG_STAT_SETS:
+            raise ValueError(
+                f"ncmapss_agg_stats must be one of {sorted(NCMAPSS_AGG_STAT_SETS)}, "
+                f"got {self.ncmapss_agg_stats!r}")
+        if self.ncmapss_agg_stride < 1:
+            raise ValueError(
+                f"ncmapss_agg_stride must be >= 1 (1 = keep every 1 Hz row), got "
+                f"{self.ncmapss_agg_stride}")
+        if self.alarm_horizon is not None:
+            if self.alarm_horizon < 1:
+                raise ValueError(
+                    f"alarm_horizon must be >= 1 cycle, got {self.alarm_horizon}")
+            if self.alarm_horizon >= self.max_rul:
+                # The binary label is read off the (clipped) RUL, so a horizon at or
+                # beyond the clip point would mark every clipped row as "no alarm".
+                raise ValueError(
+                    f"alarm_horizon ({self.alarm_horizon}) must be < max_rul "
+                    f"({self.max_rul}): the alarm label is read off the RUL target, "
+                    f"which is clipped at max_rul, so a horizon at/after the clip "
+                    f"point is invisible. Raise max_rul or lower the horizon.")
+        if not 0.0 < self.alarm_threshold < 1.0:
+            raise ValueError(
+                f"alarm_threshold must be in (0, 1), got {self.alarm_threshold}")
+        if self.hydraulic_agg_stats not in NCMAPSS_AGG_STAT_SETS:
+            raise ValueError(
+                f"hydraulic_agg_stats must be one of {sorted(NCMAPSS_AGG_STAT_SETS)}, "
+                f"got {self.hydraulic_agg_stats!r}")
+        if self.hydraulic_taxonomy_component not in HYDRAULIC_COMPONENTS:
+            raise ValueError(
+                f"hydraulic_taxonomy_component must be one of {HYDRAULIC_COMPONENTS}, "
+                f"got {self.hydraulic_taxonomy_component!r}")
+        if self.metropt_cycle_minutes < 1:
+            raise ValueError(
+                f"metropt_cycle_minutes must be >= 1, got {self.metropt_cycle_minutes}")
+        if not 0.0 <= self.metropt_min_bin_coverage <= 1.0:
+            raise ValueError(
+                f"metropt_min_bin_coverage is a FRACTION of a bin's wall-clock time and "
+                f"must be in [0, 1], got {self.metropt_min_bin_coverage}")
         # Typo-guard the noise kind at construction; the sim-only (real-dataset)
         # guard fires where the perturbation is APPLIED (data.load_prepared), so a
         # real-dataset config can still be built to assert the key/guard behavior.
@@ -379,8 +740,12 @@ class Config:
         # Resolve the dataset kind's default sensor channels (one-knob dataset
         # switching, CHANGES.md §24). replace() re-runs this, so a dataset change
         # with sensor_columns=None re-resolves for the new dataset.
+        # NOTE: a mode/stat-set change that alters the CHANNEL SET (XJTU feature mode,
+        # N-CMAPSS stat set) must be passed together with ``sensor_columns=None`` --
+        # ``replace`` carries the already-resolved list forward otherwise. The factor
+        # probes do exactly that (src/probes.py).
         if self.sensor_columns is None:
-            self.sensor_columns = list(DEFAULT_SENSOR_COLUMNS[self.dataset_kind()])
+            self.sensor_columns = list(self.default_sensor_columns())
 
     # -- helpers -------------------------------------------------------------
     def replace(self, **kwargs) -> "Config":
@@ -397,22 +762,70 @@ class Config:
     def num_channels(self) -> int:
         return len(self.sensor_columns)
 
+    def default_sensor_columns(self) -> list:
+        """The channel set this dataset serves at the CURRENT feature/aggregation mode.
+
+        Falls back to ``DEFAULT_SENSOR_COLUMNS[kind]`` for every family whose channel
+        set is fixed. The two families with a mode knob resolve it here so switching
+        the knob is one field, not a hand-copied channel list:
+          * XJTU-SY -- ``xjtu_feature_mode`` (RQ-D, §52);
+          * N-CMAPSS -- ``ncmapss_agg_stats`` (RQ-G, §53).
+        At the default mode each returns EXACTLY the historical list, so every recorded
+        cache key is byte-identical (asserted in tests/test_cache_keys.py)."""
+        kind = self.dataset_kind()
+        if kind == "xjtu":
+            raw = xjtu_raw_columns(self.xjtu_raw_channels)
+            if self.xjtu_feature_mode == "raw":
+                return list(raw)
+            if self.xjtu_feature_mode == "raw+indicators":
+                return list(raw) + list(XJTU_FEATURE_COLUMNS)
+            return list(XJTU_FEATURE_COLUMNS)
+        if kind == "ncmapss":
+            return ncmapss_feature_columns(self.ncmapss_agg_stats)
+        if kind == "hydraulic":
+            return hydraulic_feature_columns(self.hydraulic_agg_stats)
+        if kind == "backblaze":
+            # Fleet-scale RQ-C: WHICH SMART attributes you record is the config choice.
+            return list(self.backblaze_smart_columns)
+        return list(DEFAULT_SENSOR_COLUMNS[kind])
+
     def effective_tsfm_context(self) -> int:
         """History length (cycles) the TSFM sees. Defaults to the baseline window."""
         return self.tsfm_context_length if self.tsfm_context_length is not None else self.window_size
 
     def dataset_kind(self) -> str:
-        """'cmapss', 'xjtu', or 'ncmapss' -- selects the loader in
-        ``data.load_prepared`` (via the src/datasets/ registry)."""
+        """The loader family for ``config.dataset`` -- 'cmapss', 'xjtu', 'ncmapss',
+        'metropt', 'hydraulic' or 'backblaze' -- which ``data.load_prepared`` dispatches
+        on through the src/datasets/ registry."""
         if self.dataset in XJTU_DATASETS:
             return "xjtu"
+        if self.dataset in METROPT_DATASETS:
+            return "metropt"
+        if self.dataset in HYDRAULIC_DATASETS:
+            return "hydraulic"
+        if self.dataset in BACKBLAZE_DATASETS:
+            return "backblaze"
         if self.dataset in NCMAPSS_DATASETS or self.dataset.startswith("DS"):
             return "ncmapss"
         if self.dataset.startswith("FD"):
             return "cmapss"
         raise ValueError(
             f"unknown dataset {self.dataset!r}; expected FD001-FD004, "
-            f"one of {XJTU_DATASETS}, or one of {NCMAPSS_DATASETS}")
+            f"one of {XJTU_DATASETS}, one of {NCMAPSS_DATASETS}, "
+            f"one of {METROPT_DATASETS}, one of {HYDRAULIC_DATASETS}, "
+            f"or one of {BACKBLAZE_DATASETS}")
+
+    def is_censored_dataset(self) -> bool:
+        """True iff this dataset's fleet is mostly-healthy with right-censored
+        survivors (MetroPT, Backblaze), so it is scored with the alarm/lead-time metric
+        and never tabled against the run-to-failure NASA scores (§54)."""
+        return self.dataset_kind() in CENSORED_DATASET_KINDS
+
+    def is_classification_dataset(self) -> bool:
+        """True iff this dataset contains NO failure events, so neither a RUL nor an
+        alarm target is meaningful and its deliverable is the RQ-F taxonomy probe
+        (UCI Hydraulic -- see CLASSIFICATION_DATASET_KINDS)."""
+        return self.dataset_kind() in CLASSIFICATION_DATASET_KINDS
 
     def is_simulated_dataset(self) -> bool:
         """True iff ``config.dataset`` is a SIMULATED family (C-MAPSS/N-CMAPSS) and
@@ -463,6 +876,11 @@ class Config:
             # Changes every cached window/embedding when toggled (CHANGES.md §21).
             "condition_norm": self.effective_condition_norm(),
         }
+        # The censoring/alarm target adds a LABEL column and drops the rows whose alarm
+        # label is unknowable (§54), so it changes the cached windows -- but only when
+        # set, so every run-to-failure key stays byte-identical.
+        if self.alarm_horizon is not None:
+            d["alarm_horizon"] = int(self.alarm_horizon)
         # Sim-only perturbation (RQ-H, §38) mutates the readings BEFORE windowing, so
         # it changes the cached windows/embeddings -- but only when set. Added
         # CONDITIONALLY so every existing (unperturbed) FD001 key stays byte-identical.
@@ -476,11 +894,46 @@ class Config:
         if self.dataset_kind() == "xjtu":  # split protocol changes the data itself
             d["xjtu_test_bearings"] = sorted(self.xjtu_test_bearings)
             d["xjtu_test_truncation"] = self.xjtu_test_truncation
+            # RQ-D feature mode (§52): the raw arms emit DIFFERENT channel values from
+            # the same snapshots, so they must key apart -- but only when engaged, so
+            # every recorded indicator-mode XJTU key stays byte-identical.
+            if self.xjtu_feature_mode != "indicators":
+                d["xjtu_feature_mode"] = self.xjtu_feature_mode
+                d["xjtu_raw_channels"] = self.xjtu_raw_channels
+                d["xjtu_raw_reduce"] = self.xjtu_raw_reduce
         if self.dataset_kind() == "ncmapss":  # truncation changes the test data
             d["ncmapss_test_truncation"] = self.ncmapss_test_truncation
+            # RQ-G aggregation knobs (§53): each changes the per-cycle values, so each
+            # keys -- conditionally, so existing DS0x/DSALL keys are unchanged.
+            if self.ncmapss_agg_stride != 1:
+                d["ncmapss_agg_stride"] = self.ncmapss_agg_stride
+            if self.ncmapss_agg_stats != "mean_std":
+                d["ncmapss_agg_stats"] = self.ncmapss_agg_stats
             if self.dataset == "DSALL":  # which files were unioned defines the dataset
                 d["dsall_datasets"] = (sorted(self.dsall_datasets)
                                        if self.dsall_datasets is not None else "auto")
+        # The three Phase-B families are NEW, so every field that shapes their data goes
+        # in unconditionally for them -- and, being family-scoped, can never re-key an
+        # existing C-MAPSS / XJTU / N-CMAPSS cache.
+        if self.dataset_kind() == "metropt":
+            d["metropt_cycle_minutes"] = self.metropt_cycle_minutes
+            d["metropt_min_samples_per_cycle"] = self.metropt_min_samples_per_cycle
+            d["metropt_min_bin_coverage"] = self.metropt_min_bin_coverage
+            d["metropt_test_runs"] = sorted(int(r) for r in self.metropt_test_runs)
+            d["metropt_test_truncation"] = self.metropt_test_truncation
+        if self.dataset_kind() == "hydraulic":
+            d["hydraulic_drop_unstable"] = self.hydraulic_drop_unstable
+            d["hydraulic_agg_stats"] = self.hydraulic_agg_stats
+            d["hydraulic_test_fraction"] = self.hydraulic_test_fraction
+        if self.dataset_kind() == "backblaze":
+            d["backblaze_models"] = sorted(self.backblaze_models)
+            d["backblaze_start_date"] = self.backblaze_start_date
+            d["backblaze_end_date"] = self.backblaze_end_date
+            d["backblaze_min_days"] = self.backblaze_min_days
+            d["backblaze_max_survivors_per_model"] = self.backblaze_max_survivors_per_model
+            d["backblaze_test_fraction"] = self.backblaze_test_fraction
+            # Survivor subsampling is seeded from config.seed, which is in no other key.
+            d["backblaze_seed"] = self.seed
         return d
 
     def _embedding_key_fields(self) -> dict:

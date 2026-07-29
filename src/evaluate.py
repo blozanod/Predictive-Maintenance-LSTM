@@ -131,6 +131,112 @@ def cost_curve(y_true, y_pred, cost_ratios) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# The censored / alarm chapter metric (RESEARCH_PLAN §8; CHANGES.md §54)
+#
+# Mostly-healthy real fleets (MetroPT, Backblaze) cannot use the NASA score: it needs a
+# RUL for every unit, and a right-censored survivor has none. Their chapter-specific
+# metric is instead "did we raise the alarm in time?" -- precision/recall at a fixed
+# alarm lead-time, plus the LEAD TIME actually bought on the events we caught. These
+# numbers are reported separately and are NEVER tabled against the RUL datasets' NASA
+# scores (same non-comparability discipline as XJTU/N-CMAPSS, CHANGES.md §27).
+# ---------------------------------------------------------------------------
+# Numeric metric columns written per row of a censored/alarm run. Deliberately DISJOINT
+# from METRIC_FIELDS so an alarm row and a RUL row can never be averaged together.
+ALARM_METRIC_FIELDS = (
+    "alarm_precision", "alarm_recall", "alarm_f1", "alarm_specificity",
+    "alarm_auroc", "alarm_ap", "alarm_brier",
+    "alarm_mean_lead_time", "alarm_median_lead_time",
+)
+
+
+def alarm_metrics(y_true, y_prob, threshold: float = 0.5) -> dict:
+    """Classification metrics for the binary alarm arm at one operating threshold.
+
+    ``y_true`` is the 0/1 ``failure_within_horizon`` label, ``y_prob`` the predicted
+    probability. Returns precision / recall / F1 / specificity at ``threshold`` plus the
+    threshold-FREE ranking metrics (AUROC, average precision) and the Brier score, so a
+    model is never judged only at an arbitrary cut point.
+
+    Degenerate inputs are reported as ``nan`` rather than raising or silently scoring 0:
+    precision is nan when nothing is flagged, recall when there are no positives, and the
+    ranking metrics when only one class is present (routine under heavy imbalance --
+    Backblaze drive-days are ~0.1% failures)."""
+    y_true = np.asarray(y_true, np.float64)
+    y_prob = np.asarray(y_prob, np.float64)
+    if y_true.size == 0:
+        raise ValueError("alarm_metrics needs at least one prediction")
+    pred = y_prob >= float(threshold)
+    pos = y_true > 0.5
+    tp = float(np.sum(pred & pos))
+    fp = float(np.sum(pred & ~pos))
+    fn = float(np.sum(~pred & pos))
+    tn = float(np.sum(~pred & ~pos))
+    nan = float("nan")
+    precision = tp / (tp + fp) if (tp + fp) > 0 else nan
+    recall = tp / (tp + fn) if (tp + fn) > 0 else nan
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else nan
+    if precision == precision and recall == recall and (precision + recall) > 0:
+        f1 = 2 * precision * recall / (precision + recall)
+    else:
+        f1 = nan
+    # Reuse reference implementations (repo invariant §5); both need both classes.
+    if pos.any() and (~pos).any():
+        from sklearn.metrics import average_precision_score, roc_auc_score
+        auroc = float(roc_auc_score(y_true, y_prob))
+        ap = float(average_precision_score(y_true, y_prob))
+    else:
+        auroc = ap = nan
+    return {
+        "alarm_precision": precision, "alarm_recall": recall, "alarm_f1": f1,
+        "alarm_specificity": specificity, "alarm_auroc": auroc, "alarm_ap": ap,
+        "alarm_brier": float(np.mean((y_prob - y_true) ** 2)),
+        "alarm_tp": int(tp), "alarm_fp": int(fp), "alarm_fn": int(fn),
+        "alarm_tn": int(tn), "alarm_threshold": float(threshold),
+        "n": int(y_true.size), "n_positive": int(pos.sum()),
+    }
+
+
+def alarm_lead_times(y_true, y_prob, rul_true, threshold: float = 0.5) -> dict:
+    """Lead time actually bought on the events the alarm CAUGHT.
+
+    For every true-positive row (a real within-horizon event that was flagged), the lead
+    time is that row's true RUL -- how many cycles of warning the alarm gave. Reports the
+    mean/median/min over those rows; all nan when nothing was caught. This is what turns
+    a recall number into the operational claim MetroPT's requirement is written in
+    ("detect >= 2 h before the unit is non-operational")."""
+    y_true = np.asarray(y_true, np.float64)
+    y_prob = np.asarray(y_prob, np.float64)
+    rul_true = np.asarray(rul_true, np.float64)
+    caught = (y_prob >= float(threshold)) & (y_true > 0.5)
+    leads = rul_true[caught]
+    nan = float("nan")
+    if leads.size == 0:
+        return {"alarm_mean_lead_time": nan, "alarm_median_lead_time": nan,
+                "alarm_min_lead_time": nan, "n_caught": 0}
+    return {"alarm_mean_lead_time": float(np.mean(leads)),
+            "alarm_median_lead_time": float(np.median(leads)),
+            "alarm_min_lead_time": float(np.min(leads)),
+            "n_caught": int(leads.size)}
+
+
+def alarm_threshold_sweep(y_true, y_prob, thresholds) -> list[dict]:
+    """``alarm_metrics`` across a range of operating thresholds -- the alarm arm's
+    answer to the cost curve (CHANGES.md §37): no single arbitrary operating point, the
+    whole precision/recall trade-off is the result."""
+    return [{"threshold": float(t), **alarm_metrics(y_true, y_prob, t)}
+            for t in thresholds]
+
+
+def evaluate_alarm_predictions(y_true, y_prob, rul_true,
+                               threshold: float = 0.5) -> dict:
+    """The censored arm's row of metrics: ``alarm_metrics`` at ``threshold`` plus the
+    lead times bought. Mirrors ``evaluate_predictions``' role for the RUL arms -- and
+    emits a DISJOINT set of column names so the two can never be averaged together."""
+    return {**alarm_metrics(y_true, y_prob, threshold),
+            **alarm_lead_times(y_true, y_prob, rul_true, threshold)}
+
+
+# ---------------------------------------------------------------------------
 # Provenance
 # ---------------------------------------------------------------------------
 def package_versions() -> dict:

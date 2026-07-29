@@ -308,3 +308,14 @@ def write_synthetic_xjtu(
                 header = "Horizontal_vibration_signals,Vertical_vibration_signals"
                 np.savetxt(bdir / f"{i}.csv", x, delimiter=",", header=header,
                            comments="", fmt="%.5f")
+
+
+# ---------------------------------------------------------------------------
+# Phase-B real-dataset fixtures (CHANGES.md §54-§56). Each lives in its own module
+# (they emit genuinely different on-disk formats and are large) and is re-exported here
+# so callers keep importing every fixture from one place.
+# ---------------------------------------------------------------------------
+from tests.synthetic_metropt import (  # noqa: E402,F401
+    SYNTHETIC_METROPT_EVENTS, SYNTHETIC_METROPT_GAPS, write_synthetic_metropt)
+from tests.synthetic_hydraulic import write_synthetic_hydraulic  # noqa: E402,F401
+from tests.synthetic_backblaze import write_synthetic_backblaze  # noqa: E402,F401

@@ -33,6 +33,9 @@ from . import datasets as datasets_pkg
 from .datasets.cmapss import load_cmapss  # noqa: F401
 from .datasets.xjtu import load_xjtu  # noqa: F401
 from .datasets.ncmapss import load_ncmapss  # noqa: F401
+from .datasets.metropt import load_metropt  # noqa: F401
+from .datasets.hydraulic import load_hydraulic  # noqa: F401
+from .datasets.backblaze import load_backblaze  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +49,9 @@ def load_prepared(config: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     Returns (df_train, df_test), both carrying ``actual_rul``/``clipped_rul`` and
     the canonical C-MAPSS-shaped columns (unit_number, time_cycles, settings,
-    sensor channels)."""
+    sensor channels). When ``config.alarm_horizon`` is set (the censored real fleets,
+    §54) they additionally carry ``failure_within_horizon`` and the rows whose alarm
+    label is unknowable have been dropped."""
     # Raw loading is dispatched by dataset family through the src/datasets/ registry;
     # every family emits the same canonical frame shape.
     df_train, df_test, rul_truth = datasets_pkg.load_raw(config)
@@ -58,6 +63,14 @@ def load_prepared(config: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
     # windowing (CHANGES.md §38). No-op unless config.noise_injection is set.
     if config.noise_injection:
         df_train, df_test = apply_noise_injection(df_train, df_test, config)
+    # Censoring-aware alarm target (§54): added AFTER the RUL labels it is read from,
+    # and the unknowable (censored-inside-horizon) rows dropped rather than guessed.
+    # No-op unless config.alarm_horizon is set.
+    if config.alarm_horizon is not None:
+        df_train = drop_unlabeled_rows(add_alarm_label(df_train, config),
+                                       ALARM_LABEL_COLUMN)
+        df_test = drop_unlabeled_rows(add_alarm_label(df_test, config),
+                                      ALARM_LABEL_COLUMN)
     return df_train, df_test
 
 
@@ -209,17 +222,89 @@ def condition_normalize(
 # ---------------------------------------------------------------------------
 # RUL labels
 # ---------------------------------------------------------------------------
+# Column a censored loader adds to mark whether each unit's run ends in an OBSERVED
+# event (1: a real failure/intervention) or is RIGHT-CENSORED (0: the unit was still
+# alive when observation stopped). Run-to-failure families never emit it, and every
+# code path treats its absence as "all events observed" -- so nothing changes for them.
+EVENT_OBSERVED_COLUMN = "event_observed"
+
+# Binary censoring-aware target (RESEARCH_PLAN §4; CHANGES.md §54): 1 if the unit
+# reaches its intervention within ``config.alarm_horizon`` cycles of this row, 0 if it
+# is known NOT to, NaN when the observation ends too early to know (censored rows
+# inside the horizon). NaN rows are DROPPED, never guessed.
+ALARM_LABEL_COLUMN = "failure_within_horizon"
+
+
 def add_train_rul(df_train: pd.DataFrame, config: Config) -> pd.DataFrame:
     """Add ``actual_rul`` and ``clipped_rul`` to the training frame.
 
     Training RUL = (unit's max cycle) - (current cycle), clipped at max_rul.
     Piecewise-linear target, community convention (Heimes 2008; Li et al. 2018).
+
+    For a RIGHT-CENSORED unit (``event_observed == 0``, emitted only by the censored
+    real-fleet loaders) the same arithmetic yields time-to-LAST-OBSERVATION, which is a
+    LOWER BOUND on its true RUL, not the RUL. That column is therefore only ever
+    consumed for censored units through ``add_alarm_label`` -- which uses it solely to
+    decide what is knowable -- never as a regression target (§54).
     """
     df = df_train.copy()
     max_cycle = df.groupby("unit_number")["time_cycles"].transform("max")
     df["actual_rul"] = max_cycle - df["time_cycles"]
     df["clipped_rul"] = df["actual_rul"].clip(upper=config.max_rul)
     return df
+
+
+# ---------------------------------------------------------------------------
+# Censoring-aware alarm label (RESEARCH_PLAN §4; CHANGES.md §54)
+# ---------------------------------------------------------------------------
+def add_alarm_label(df: pd.DataFrame, config: Config) -> pd.DataFrame:
+    """Add the binary ``failure_within_horizon`` target for a mostly-healthy fleet.
+
+    With ``H = config.alarm_horizon`` and ``r`` = each row's time to the end of its
+    unit's observed run:
+
+    * **Observed event** (``event_observed`` 1, or absent -- every run-to-failure
+      dataset): the run really ends in an intervention, so the label is exactly
+      ``r <= H``.
+    * **Right-censored** (``event_observed`` 0): the unit was still alive when
+      observation stopped.
+        - ``r > H``  -> label **0**. The unit provably survived the whole horizon, so
+          this row is a genuine negative and the censored survivor DOES contribute
+          training signal (the point of the censoring chapter).
+        - ``r <= H`` -> label **NaN**. The horizon extends past the end of observation;
+          whether the unit failed in that window is UNKNOWABLE. Guessing 0 here is the
+          classic censoring bug -- it silently teaches "healthy" from absence of
+          evidence and inflates precision. These rows are dropped (``drop_unlabeled_rows``).
+
+    This is standard administrative-censoring treatment for a fixed-horizon binary
+    target. Returns a copy; a no-op returning the frame unchanged when
+    ``alarm_horizon`` is None."""
+    if config.alarm_horizon is None:
+        return df
+    out = df.copy()
+    horizon = int(config.alarm_horizon)
+    within = out["actual_rul"].to_numpy(np.float64) <= horizon
+    if EVENT_OBSERVED_COLUMN in out.columns:
+        observed = out[EVENT_OBSERVED_COLUMN].to_numpy(np.float64) > 0.5
+    else:
+        observed = np.ones(len(out), dtype=bool)   # run-to-failure: every run ends in one
+    label = np.where(within, 1.0, 0.0)
+    # censored AND inside the horizon -> unknowable
+    label[(~observed) & within] = np.nan
+    out[ALARM_LABEL_COLUMN] = label
+    return out
+
+
+def drop_unlabeled_rows(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
+    """Drop rows whose ``target_col`` is NaN -- the censored rows whose alarm label is
+    unknowable (``add_alarm_label``). Returns the frame unchanged when the column is
+    absent or fully labelled, so the run-to-failure path is untouched."""
+    if target_col not in df.columns:
+        return df
+    keep = df[target_col].notna().to_numpy()
+    if keep.all():
+        return df
+    return df.loc[keep].reset_index(drop=True)
 
 
 def add_test_rul(

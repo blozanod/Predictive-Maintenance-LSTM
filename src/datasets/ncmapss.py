@@ -17,11 +17,15 @@ everything downstream of ``data.load_prepared`` runs unchanged (mirrors the XJTU
 indicator-trend design, CHANGES.md §22, §27):
   * one "cycle" = one flight; ``time_cycles`` = the flight index (``A.cycle``);
   * one "unit"  = one engine (``A.unit``; dev/test ids are disjoint within a file);
-  * "sensors"   = per-cycle SUMMARY STATISTICS of the 18 raw channels
-    (``mean`` + ``std`` of each W and X_s channel) plus ``cycle_len_s`` = the number
-    of 1 Hz rows in the flight (observable flight duration) -- ``NCMAPSS_FEATURE_COLUMNS``,
-    37 channels. NOT the raw 1 Hz sub-cycle series (Chronos-2 contexts are per-cycle
-    multivariate series; cycle aggregation is the standard cycle-level formulation);
+  * "sensors"   = per-cycle SUMMARY STATISTICS of the 18 raw channels plus
+    ``cycle_len_s`` = the number of 1 Hz rows in the flight (observable flight
+    duration). NOT the raw 1 Hz sub-cycle series (Chronos-2 contexts are per-cycle
+    multivariate series; cycle aggregation is the standard cycle-level formulation).
+    Two RQ-G knobs (CHANGES.md §53) set the granularity, defaulting to the historical
+    behaviour: ``config.ncmapss_agg_stats`` picks the statistic set (``mean_std``, 37
+    channels -- the default -- or ``mean_std_minmax_slope``, 91), and
+    ``config.ncmapss_agg_stride`` sub-samples each flight's 1 Hz rows 1-in-N before
+    aggregating (the "how finely must you sample?" intervention);
   * ``setting_1`` = ``Fc`` (flight class, constant per unit), ``setting_2/3`` = 0.
 
 Condition normalization resolves auto-OFF for N-CMAPSS (flight conditions are
@@ -52,7 +56,8 @@ import pandas as pd
 
 from ..config import (Config, INDEX_COLUMNS, SETTING_COLUMNS,
                       NCMAPSS_DATASETS, NCMAPSS_W_VARS, NCMAPSS_XS_VARS,
-                      NCMAPSS_FEATURE_COLUMNS)
+                      NCMAPSS_AGG_STAT_SETS, NCMAPSS_FEATURE_COLUMNS,
+                      ncmapss_feature_columns)
 from .base import resolve_data_dir
 
 # Accepted subdirectory name(s) of ``config.data_root`` holding the .h5 files (flat).
@@ -64,11 +69,22 @@ DATASETS = tuple(NCMAPSS_DATASETS)
 
 # Bump whenever the AGGREGATION LOGIC changes, so stale per-file aggregate caches
 # (cache/ncmapss_agg_<ds>_v<N>.npz) are invalidated -- the role CACHE_SCHEMA_VERSION
-# plays for embeddings. The aggregate is otherwise config-INDEPENDENT (no knobs).
+# plays for embeddings. Since §53 the aggregate ALSO depends on two config knobs
+# (``ncmapss_agg_stride``/``ncmapss_agg_stats``, RQ-G), which are folded into the cache
+# FILENAME rather than this version -- each knob combination is a separate, coexisting
+# aggregate. The version still guards changes to the aggregation LOGIC itself.
 NCMAPSS_AGG_VERSION = 1
 
-# Canonical numeric-matrix column order used by the aggregate cache.
-_CANON_COLUMNS = list(INDEX_COLUMNS) + list(SETTING_COLUMNS) + list(NCMAPSS_FEATURE_COLUMNS)
+
+def _canon_columns(agg_stats: str = "mean_std") -> list:
+    """Canonical numeric-matrix column order used by the aggregate cache, at one
+    aggregation stat set (RQ-G, §53)."""
+    return (list(INDEX_COLUMNS) + list(SETTING_COLUMNS)
+            + list(ncmapss_feature_columns(agg_stats)))
+
+
+# The default (mean_std) canonical order -- the historical constant, unchanged.
+_CANON_COLUMNS = _canon_columns("mean_std")
 
 _CONFIG_VARS = list(NCMAPSS_W_VARS) + list(NCMAPSS_XS_VARS)   # W then X_s, config order
 
@@ -118,9 +134,53 @@ def _decode_vars(arr) -> list[str]:
     return [str(x).strip() for x in np.array(arr).astype("U20").ravel()]
 
 
-def _aggregate_split(W, X_s, A, w_var, xs_var) -> np.ndarray:
+def _group_slopes(df: pd.DataFrame, group_cols: list, t_col: str,
+                  value_cols: list) -> pd.DataFrame:
+    """Per-group least-squares slope of each ``value_cols`` channel against ``t_col``
+    (the within-flight second index), via the algebraic identity
+    ``cov(t, x) / var(t)`` -- so no per-group Python loop runs over millions of rows.
+
+    Groups whose ``t`` has zero variance (a single retained row) have an undefined
+    slope and get 0.0 -- the same convention ``std`` uses for 1-row cycles (§27).
+    The products frame is built in float32 and ONLY when a slope is requested, so the
+    default ``mean_std`` path never pays for it."""
+    g = df.groupby(group_cols, sort=True)
+    t_mean = g[t_col].mean()
+    t_sq_mean = g[t_col].apply(lambda s: float(np.mean(np.square(s.to_numpy(np.float64)))))
+    denom = (t_sq_mean - t_mean ** 2)
+    x_mean = g[value_cols].mean()
+    prod = pd.DataFrame(
+        {v: (df[v].to_numpy(np.float32) * df[t_col].to_numpy(np.float32))
+         for v in value_cols})
+    for c in group_cols:
+        prod[c] = df[c].to_numpy()
+    xt_mean = prod.groupby(group_cols, sort=True)[value_cols].mean()
+    cov = xt_mean - x_mean.mul(t_mean, axis=0)
+    slopes = cov.div(denom, axis=0)
+    # Zero out the undefined groups explicitly on the numpy array: a (n_groups, 1) mask
+    # does NOT broadcast across DataFrame.where, which silently works for a single
+    # channel and raises for the real 18-channel case.
+    values = slopes.to_numpy(np.float64, copy=True)
+    values[np.asarray(denom.to_numpy(np.float64)) <= 0, :] = 0.0
+    return pd.DataFrame(np.nan_to_num(values, nan=0.0),
+                        index=slopes.index, columns=slopes.columns)
+
+
+def _aggregate_split(W, X_s, A, w_var, xs_var, agg_stride: int = 1,
+                     agg_stats: str = "mean_std") -> np.ndarray:
     """Aggregate one split's 1 Hz rows to the canonical per-cycle numeric matrix
-    ``(n_cycles, len(_CANON_COLUMNS))``. Column order == ``_CANON_COLUMNS``."""
+    ``(n_cycles, len(_canon_columns(agg_stats)))``.
+
+    ``agg_stride`` sub-samples each flight's rows 1-in-N BEFORE the statistics are
+    computed -- the RQ-G "how finely must you sample?" intervention (§53). Striding is
+    WITHIN each flight (``cumcount % stride == 0``), so row 0 of every flight is always
+    kept and no flight can become empty.
+
+    DECISION (uncited): ``cycle_len_s`` stays the FULL 1 Hz row count even under a
+    stride, because flight duration is observable from the flight's start/end times
+    regardless of how fast the sensors were polled. Deriving it from the retained rows
+    instead would confound the sampling-rate intervention with the silent loss of a
+    duration covariate -- two different collection choices."""
     file_vars = list(w_var) + list(xs_var)
     if set(file_vars) != set(_CONFIG_VARS):
         raise ValueError(
@@ -129,6 +189,7 @@ def _aggregate_split(W, X_s, A, w_var, xs_var) -> np.ndarray:
             f"  config     : {sorted(_CONFIG_VARS)}\n"
             "Update NCMAPSS_W_VARS/NCMAPSS_XS_VARS in src/config.py to match the file "
             "(and bump NCMAPSS_AGG_VERSION); do NOT silently reorder.")
+    stats = NCMAPSS_AGG_STAT_SETS[agg_stats]
     # Reorder raw channels (file order) into config order (W then X_s).
     order = [file_vars.index(v) for v in _CONFIG_VARS]
     raw = np.concatenate([np.asarray(W, np.float64), np.asarray(X_s, np.float64)],
@@ -139,36 +200,51 @@ def _aggregate_split(W, X_s, A, w_var, xs_var) -> np.ndarray:
     df["__unit"] = np.asarray(A[:, 0], np.int64)
     df["__cycle"] = np.asarray(A[:, 1], np.int64)
     df["__fc"] = np.asarray(A[:, 2], np.float64)
+    keys = ["__unit", "__cycle"]
 
-    g = df.groupby(["__unit", "__cycle"], sort=True)
-    means = g[_CONFIG_VARS].mean()
-    stds = g[_CONFIG_VARS].std().fillna(0.0)   # 1-row cycles -> NaN std -> 0
-    counts = g.size().to_numpy(np.float64)     # cycle_len_s (rows per flight)
-    fc_first = g["__fc"].first().to_numpy(np.float64)
+    # cycle_len_s + the flight class come from the FULL flight (see the docstring).
+    full = df.groupby(keys, sort=True)
+    counts = full.size().to_numpy(np.float64)
+    fc_first = full["__fc"].first().to_numpy(np.float64)
+    # Within-flight second index; also the slope's x-axis (kept in TRUE seconds so a
+    # slope stays per-second and therefore comparable across strides).
+    df["__t"] = full.cumcount().to_numpy(np.float64)
+    if agg_stride > 1:
+        df = df[(df["__t"].to_numpy(np.int64) % agg_stride) == 0]
 
-    # Interleave mean/std per variable to match NCMAPSS_FEATURE_COLUMNS ordering.
-    feat = np.empty((len(means), 2 * len(_CONFIG_VARS)), np.float64)
+    g = df.groupby(keys, sort=True)
+    computed = {"mean": lambda: g[_CONFIG_VARS].mean(),
+                "std": lambda: g[_CONFIG_VARS].std().fillna(0.0),  # 1-row cycle -> 0
+                "min": lambda: g[_CONFIG_VARS].min(),
+                "max": lambda: g[_CONFIG_VARS].max(),
+                "slope": lambda: _group_slopes(df, keys, "__t", _CONFIG_VARS)}
+    tables = {s: computed[s]() for s in stats}
+
+    # Interleave the statistics per variable to match ncmapss_feature_columns' order.
+    n_stats = len(stats)
+    means_index = tables[stats[0]].index
+    feat = np.empty((len(means_index), n_stats * len(_CONFIG_VARS)), np.float64)
     for j, v in enumerate(_CONFIG_VARS):
-        feat[:, 2 * j] = means[v].to_numpy()
-        feat[:, 2 * j + 1] = stds[v].to_numpy()
+        for k, s in enumerate(stats):
+            feat[:, n_stats * j + k] = tables[s][v].to_numpy()
     # DECISION (uncited): cycle_len_s (rows per flight) is an observable, deployment-
     # legitimate covariate (flight duration); the §19 age-confound arms bound "cheap
     # covariate" critiques. CHANGES.md §27.
     feat = np.concatenate([feat, counts[:, None]], axis=1)   # + cycle_len_s
 
-    midx = means.index
-    unit_arr = midx.get_level_values(0).to_numpy(np.float64)
-    cycle_arr = midx.get_level_values(1).to_numpy(np.float64)
+    unit_arr = means_index.get_level_values(0).to_numpy(np.float64)
+    cycle_arr = means_index.get_level_values(1).to_numpy(np.float64)
     zeros = np.zeros_like(fc_first)
     canon = np.column_stack([unit_arr, cycle_arr, fc_first, zeros, zeros, feat])
-    assert canon.shape[1] == len(_CANON_COLUMNS)
+    assert canon.shape[1] == len(_canon_columns(agg_stats))
     return canon.astype(np.float64)
 
 
-def _read_and_aggregate(h5_path: Path) -> tuple[np.ndarray, np.ndarray]:
+def _read_and_aggregate(h5_path: Path, agg_stride: int = 1,
+                        agg_stats: str = "mean_std") -> tuple[np.ndarray, np.ndarray]:
     """Open one .h5, read ONLY W/X_s/A (+ W/X_s name arrays), aggregate dev and test to
-    canonical numeric matrices. X_v/T/Y (oracles) are never touched. A's numeric column
-    order (unit, cycle, Fc, hs) is fixed by the dataset docs."""
+    canonical numeric matrices at the requested granularity (§53). X_v/T/Y (oracles) are
+    never touched. A's numeric column order (unit, cycle, Fc, hs) is fixed by the docs."""
     import h5py
 
     with h5py.File(h5_path, "r") as h:
@@ -178,8 +254,8 @@ def _read_and_aggregate(h5_path: Path) -> tuple[np.ndarray, np.ndarray]:
         W_test, X_s_test, A_test = rd("W_test"), rd("X_s_test"), rd("A_test")
         w_var, xs_var = _decode_vars(h["W_var"]), _decode_vars(h["X_s_var"])
 
-    train = _aggregate_split(W_dev, X_s_dev, A_dev, w_var, xs_var)
-    test = _aggregate_split(W_test, X_s_test, A_test, w_var, xs_var)
+    train = _aggregate_split(W_dev, X_s_dev, A_dev, w_var, xs_var, agg_stride, agg_stats)
+    test = _aggregate_split(W_test, X_s_test, A_test, w_var, xs_var, agg_stride, agg_stats)
     # Dev/test units MUST be disjoint within a file (guard, not assumed).
     dev_u, te_u = set(train[:, 0].astype(int)), set(test[:, 0].astype(int))
     if dev_u & te_u:
@@ -188,16 +264,27 @@ def _read_and_aggregate(h5_path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _agg_cache_path(config: Config, ds: str) -> Path:
-    return Path(config.cache_dir) / f"ncmapss_agg_{ds}_v{NCMAPSS_AGG_VERSION}.npz"
+    """Per-file aggregate cache path. The RQ-G knobs (§53) join the FILENAME only when
+    non-default, so every pre-§53 cache file keeps its exact name (and stays valid) while
+    each knob combination gets its own coexisting aggregate."""
+    suffix = ""
+    if config.ncmapss_agg_stride != 1:
+        suffix += f"_s{config.ncmapss_agg_stride}"
+    if config.ncmapss_agg_stats != "mean_std":
+        suffix += f"_{config.ncmapss_agg_stats}"
+    return (Path(config.cache_dir)
+            / f"ncmapss_agg_{ds}_v{NCMAPSS_AGG_VERSION}{suffix}.npz")
 
 
 def _load_or_build_aggregate(config: Config, ds: str, verbose: bool = True
                              ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return the UNTRUNCATED (df_train_full, df_test_full) canonical frames for one
     per-file dataset, using a versioned per-file aggregate cache (parsing 1-3 GB of
-    h5 is minutes; the aggregate is ~10^2-10^3 rows). Idempotent; config-independent
-    aside from NCMAPSS_AGG_VERSION."""
+    h5 is minutes; the aggregate is ~10^2-10^3 rows). Idempotent; depends only on
+    NCMAPSS_AGG_VERSION and the two RQ-G aggregation knobs, both of which are in the
+    cache filename (§53)."""
     cache_path = _agg_cache_path(config, ds)
+    columns = _canon_columns(config.ncmapss_agg_stats)
     if cache_path.exists():
         with np.load(cache_path, allow_pickle=False) as npz:
             train, test = npz["train"], npz["test"]
@@ -209,16 +296,19 @@ def _load_or_build_aggregate(config: Config, ds: str, verbose: bool = True
         root = _resolve_dir(config)
         h5_path = _find_h5(root, ds)
         if verbose:
-            print(f"[ncmapss] parsing {h5_path.name} (1 Hz -> per-cycle aggregate)...")
-        train, test = _read_and_aggregate(h5_path)
+            print(f"[ncmapss] parsing {h5_path.name} (1 Hz -> per-cycle aggregate; "
+                  f"stride={config.ncmapss_agg_stride}, "
+                  f"stats={config.ncmapss_agg_stats})...")
+        train, test = _read_and_aggregate(h5_path, config.ncmapss_agg_stride,
+                                          config.ncmapss_agg_stats)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(cache_path, train=train.astype(np.float32), test=test.astype(np.float32))
         if verbose:
             print(f"[ncmapss] parsed {ds}: {len(np.unique(train[:, 0]))} dev units, "
                   f"{len(train)} train cycles; {len(np.unique(test[:, 0]))} test units; "
                   f"cached -> {cache_path.name}")
-    df_train = pd.DataFrame(train, columns=_CANON_COLUMNS)
-    df_test = pd.DataFrame(test, columns=_CANON_COLUMNS)
+    df_train = pd.DataFrame(train, columns=columns)
+    df_test = pd.DataFrame(test, columns=columns)
     for df in (df_train, df_test):
         df["unit_number"] = df["unit_number"].astype(np.int64)
         df["time_cycles"] = df["time_cycles"].astype(np.int64)

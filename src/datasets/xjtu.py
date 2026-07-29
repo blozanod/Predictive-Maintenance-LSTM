@@ -14,11 +14,19 @@ Adaptation to the pipeline's canonical frame (the whole point -- everything
 downstream of ``data.load_prepared`` runs unchanged):
   * one "cycle"  = one 1-minute snapshot; ``time_cycles`` = snapshot index;
   * one "unit"   = one bearing (unit_number = global 1..15 in sorted name order);
-  * "sensors"    = per-snapshot condition indicators per axis
-    (``XJTU_FEATURE_COLUMNS``): classic time-domain bearing features, computed
-    per snapshot -- NOT the raw 32768-sample waveform (Chronos-2 contexts are
-    per-cycle series, and minute-level indicator trends are the standard
-    formulation for XJTU RUL);
+  * "sensors"    = the channel block selected by ``config.xjtu_feature_mode``
+    (RQ-D, CHANGES.md §52) -- the direct test of "do TSFMs make hand-crafted
+    condition indicators obsolete?":
+      - ``indicators`` (default) -- the 16 classic time-domain bearing features per
+        snapshot (``XJTU_FEATURE_COLUMNS``), the standard XJTU RUL formulation and
+        the historical behaviour (recorded cache keys unchanged);
+      - ``raw`` -- ``2 * config.xjtu_raw_channels`` values reduced from the snapshot's
+        own samples by ``config.xjtu_raw_reduce`` (``decimate`` keeps evenly-spaced
+        real samples; ``segment_rms`` keeps full-rate energy at coarser time
+        resolution). A collection choice, never a mutation of a kept reading;
+      - ``raw+indicators`` -- both blocks (raw first, then the indicators).
+    The full 32768-sample waveform is never fed directly: the pipeline is
+    cycle/window-level by design (IMPLEMENTATION_PLAN §10);
   * ``setting_1`` = condition index (0..2), ``setting_2`` = speed (Hz),
     ``setting_3`` = radial force (kN), so condition-wise normalization (data.py)
     groups by operating condition exactly as for FD002/FD004.
@@ -43,7 +51,8 @@ import pandas as pd
 # XJTU_FEATURE_COLUMNS/XJTU_BASE_FEATURES live in config.py (they seed the
 # per-dataset sensor-column defaults there without an import cycle) and are
 # re-exported here, where the features are computed.
-from ..config import Config, XJTU_BASE_FEATURES, XJTU_FEATURE_COLUMNS
+from ..config import (Config, XJTU_BASE_FEATURES, XJTU_FEATURE_COLUMNS,
+                      xjtu_raw_columns)
 from .base import resolve_data_dir
 
 # Accepted subdirectory names of ``config.data_root`` holding the 3 XJTU-SY
@@ -93,8 +102,66 @@ def snapshot_features(x: np.ndarray) -> list[float]:
     return [rms, kurt, skew, peak, p2p, crest, impulse, shape]
 
 
-def _bearing_frame(bearing_dir: Path, unit_id: int, cond: tuple) -> pd.DataFrame:
-    """All snapshots of one bearing -> rows of the canonical frame."""
+def snapshot_raw(x: np.ndarray, n_channels: int, reduce: str) -> list[float]:
+    """Reduce one axis' snapshot (1D array of samples) to ``n_channels`` values -- the
+    RQ-D "raw" representation (CHANGES.md §52). Two documented reductions:
+
+    * ``decimate``    -- ``n_channels`` evenly-spaced RAW SAMPLES (first and last
+      inclusive). Every emitted number is a reading that was actually taken, so this is
+      subtractive in the strictest sense: exactly what a practitioner recording at the
+      corresponding lower rate would hold.
+    * ``segment_rms`` -- RMS within each of ``n_channels`` contiguous equal segments,
+      preserving the snapshot's FULL-RATE energy at a coarser time resolution (the
+      aggregation-coarsening arm, RQ-G).
+
+    Fails loud when the snapshot is too short to yield the requested width rather than
+    fabricating or repeating samples (repo invariant §7).
+    """
+    x = np.asarray(x, np.float64)
+    if x.size < n_channels:
+        raise ValueError(
+            f"snapshot has {x.size} samples but xjtu_raw_channels={n_channels} were "
+            f"requested; lower xjtu_raw_channels (padding/repeating samples would "
+            f"fabricate readings).")
+    if reduce == "decimate":
+        idx = np.linspace(0, x.size - 1, n_channels).round().astype(np.int64)
+        return [float(v) for v in x[idx]]
+    # "segment_rms" (values validated in Config.__post_init__)
+    bounds = np.linspace(0, x.size, n_channels + 1).round().astype(np.int64)
+    return [float(np.sqrt(np.mean(x[a:b] ** 2))) for a, b in zip(bounds[:-1], bounds[1:])]
+
+
+def snapshot_channels(snap: np.ndarray, config: Config) -> list[float]:
+    """Both axes of one snapshot -> the channel values ``config``'s feature mode asks
+    for, in EXACTLY ``config.default_sensor_columns()`` order (raw block first, then
+    the indicators, matching ``config.xjtu_raw_columns`` + ``XJTU_FEATURE_COLUMNS``)."""
+    mode = config.xjtu_feature_mode
+    vals: list[float] = []
+    if mode in ("raw", "raw+indicators"):
+        for axis in (0, 1):
+            vals += snapshot_raw(snap[:, axis], config.xjtu_raw_channels,
+                                 config.xjtu_raw_reduce)
+    if mode in ("indicators", "raw+indicators"):
+        vals += snapshot_features(snap[:, 0]) + snapshot_features(snap[:, 1])
+    return vals
+
+
+def xjtu_channel_columns(config: Config) -> list[str]:
+    """Channel names the loader emits at ``config``'s feature mode -- the frame-side
+    twin of ``Config.default_sensor_columns()`` (same order, asserted in tests)."""
+    mode = config.xjtu_feature_mode
+    raw = xjtu_raw_columns(config.xjtu_raw_channels)
+    if mode == "raw":
+        return list(raw)
+    if mode == "raw+indicators":
+        return list(raw) + list(XJTU_FEATURE_COLUMNS)
+    return list(XJTU_FEATURE_COLUMNS)
+
+
+def _bearing_frame(bearing_dir: Path, unit_id: int, cond: tuple,
+                   config: Config) -> pd.DataFrame:
+    """All snapshots of one bearing -> rows of the canonical frame, with the channel
+    block selected by ``config.xjtu_feature_mode`` (§52)."""
     cond_idx, speed, force = cond
     files = sorted(bearing_dir.glob("*.csv"), key=lambda p: int(p.stem))
     if not files:
@@ -106,9 +173,9 @@ def _bearing_frame(bearing_dir: Path, unit_id: int, cond: tuple) -> pd.DataFrame
             raise ValueError(f"{f}: expected 2 columns (horizontal, vertical), "
                              f"got shape {snap.shape}")
         rows.append([unit_id, i, float(cond_idx), speed, force,
-                     *snapshot_features(snap[:, 0]), *snapshot_features(snap[:, 1])])
+                     *snapshot_channels(snap, config)])
     cols = (["unit_number", "time_cycles", "setting_1", "setting_2", "setting_3"]
-            + XJTU_FEATURE_COLUMNS)
+            + xjtu_channel_columns(config))
     return pd.DataFrame(rows, columns=cols)
 
 
@@ -189,7 +256,7 @@ def load_xjtu(config: Config) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     train_frames, test_frames, rul = [], [], {}
     for unit_id, name in enumerate(sorted(found), start=1):
         bdir, cond = found[name]
-        frame = _bearing_frame(bdir, unit_id, cond)
+        frame = _bearing_frame(bdir, unit_id, cond, config)
         if name in config.xjtu_test_bearings:
             n = len(frame)
             # keep >= window_size cycles so the unit yields at least one window,

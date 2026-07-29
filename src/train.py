@@ -90,7 +90,7 @@ def train_head(
     gen.manual_seed(seed)  # seeded on-device shuffling for reproducible batches (Task 2.3)
 
     history = {"step": [], "epoch": [], "train_loss": [],
-               "val_epoch": [], "val_loss": [], "val_rmse": []}
+               "val_epoch": [], "val_loss": [], "val_rmse": [], "val_score": []}
     best_val = float("inf")
     best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
     patience_left = config.head_early_stopping_patience
@@ -117,13 +117,22 @@ def train_head(
             val_out = model(Xva)
             val_loss = float(heads_mod.compute_loss(val_out, yva, loss_type, config))
             val_pred = heads_mod.decode(val_out, loss_type, config)
-        val_rmse = rmse(val_labels_np, val_pred)
+        # The alarm arm predicts a PROBABILITY, so an RMSE against RUL labels is
+        # meaningless there; it early-stops on the validation BCE instead (§54). Every
+        # regression arm keeps ``val_score == val_rmse``, so their behaviour -- and
+        # every recorded result -- is byte-identical.
+        if heads_mod.is_alarm_loss(loss_type):
+            val_rmse, val_score = float("nan"), val_loss
+        else:
+            val_rmse = rmse(val_labels_np, val_pred)
+            val_score = val_rmse
         history["val_epoch"].append(epoch)
         history["val_loss"].append(val_loss)
         history["val_rmse"].append(val_rmse)
+        history["val_score"].append(val_score)
 
-        if val_rmse < best_val - 1e-6:
-            best_val = val_rmse
+        if val_score < best_val - 1e-6:
+            best_val = val_score
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             patience_left = config.head_early_stopping_patience
         else:
@@ -132,6 +141,8 @@ def train_head(
                 break
 
     model.load_state_dict(best_state)
+    # Kept under its historical name: for every regression arm this IS the best val
+    # RMSE; for the alarm arm it is the best val BCE (see the early-stopping note).
     history["best_val_rmse"] = best_val
     if log_csv_path is not None:
         _write_history_csv(history, log_csv_path)
@@ -146,9 +157,11 @@ def _write_history_csv(history: dict, path: str | Path) -> None:
         w.writerow(["step", "epoch", "metric", "value"])
         for s, e, tl in zip(history["step"], history["epoch"], history["train_loss"]):
             w.writerow([s, e, "train_loss", tl])
-        for e, vl, vr in zip(history["val_epoch"], history["val_loss"], history["val_rmse"]):
+        for e, vl, vr, vs in zip(history["val_epoch"], history["val_loss"],
+                                 history["val_rmse"], history["val_score"]):
             w.writerow(["", e, "val_loss", vl])
             w.writerow(["", e, "val_rmse", vr])
+            w.writerow(["", e, "val_score", vs])
 
 
 @torch.no_grad()

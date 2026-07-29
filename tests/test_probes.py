@@ -121,9 +121,30 @@ def test_level_overrides_channels_noise_generic():
     assert P._level_overrides("channels", ["s_2", "s_3"]) == {"sensor_columns": ["s_2", "s_3"]}
     assert P._level_overrides("noise", {"kind": "gaussian"}) == {
         "noise_injection": {"kind": "gaussian"}}
-    assert P._level_overrides("aggregation", {"window_size": 20}) == {"window_size": 20}
+    # A generic factor's override dict passes straight through, untouched.
+    assert P._level_overrides("context", {"window_size": 20}) == {"window_size": 20}
     with pytest.raises(ValueError, match="dict of config overrides"):
-        P._level_overrides("aggregation", 5)
+        P._level_overrides("context", 5)
+
+
+def test_channel_set_factors_reset_sensor_columns(tmp_path):
+    """The Phase-B mode knobs (XJTU feature mode, N-CMAPSS stat set) change which
+    channels the LOADER emits, but ``Config.sensor_columns`` is resolved eagerly and
+    ``replace`` carries the resolved list forward -- so those factors must also reset it
+    to None or the probe would ask for columns the loader no longer emits (§52/§53)."""
+    for factor in P.CHANNEL_SET_FACTORS:
+        over = P._level_overrides(factor, {"xjtu_feature_mode": "raw"})
+        assert over["sensor_columns"] is None, factor
+    # an explicit sensor_columns in the level still wins (setdefault, not overwrite)
+    pinned = P._level_overrides("feature_mode",
+                                {"xjtu_feature_mode": "raw", "sensor_columns": ["h_raw_0"]})
+    assert pinned["sensor_columns"] == ["h_raw_0"]
+    # and the reset actually re-resolves the channel set through a real replace()
+    cfg = Config(dataset="XJTU-SY")
+    assert cfg.sensor_columns[0] == "h_rms"
+    raw_cfg = cfg.replace(**P._level_overrides("feature_mode", {"xjtu_feature_mode": "raw"}))
+    assert raw_cfg.sensor_columns == list(raw_cfg.default_sensor_columns())
+    assert raw_cfg.sensor_columns[0] == "h_raw_0"
 
 
 # ---------------------------------------------------------------------------

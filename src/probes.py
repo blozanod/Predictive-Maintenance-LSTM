@@ -42,6 +42,15 @@ FOIL_MODELS = ("gbm", "minirocket", "catch22_gbm")
 NN_MODELS = ("cnn", "lstm")
 
 
+# Factors whose levels change the dataset's CHANNEL SET as a side effect (the loader
+# emits different columns at each level). ``Config.sensor_columns`` is resolved eagerly
+# in ``__post_init__``, and ``replace`` carries the already-resolved list forward, so
+# these levels MUST also reset ``sensor_columns=None`` to re-resolve for the new mode --
+# otherwise the probe would ask the loader for columns it no longer emits (CHANGES.md
+# §52/§53). Kept as a named set so a new mode knob opts in explicitly.
+CHANNEL_SET_FACTORS = ("feature_mode", "aggregation")
+
+
 def _level_overrides(factor: str, level_value) -> dict:
     """Config overrides that realize ``level_value`` for ``factor``. ``channels`` takes
     a channel-name list, ``noise`` a ``noise_injection`` spec dict; any other factor
@@ -51,7 +60,11 @@ def _level_overrides(factor: str, level_value) -> dict:
     if factor == "noise":
         return {"noise_injection": dict(level_value)}
     if isinstance(level_value, dict):
-        return dict(level_value)
+        over = dict(level_value)
+        if factor in CHANNEL_SET_FACTORS:
+            # Re-resolve the channel set for this level's mode (see CHANNEL_SET_FACTORS).
+            over.setdefault("sensor_columns", None)
+        return over
     raise ValueError(
         f"factor {factor!r}: each level must be a dict of config overrides (got "
         f"{type(level_value).__name__}); 'channels' takes a channel-name list and "

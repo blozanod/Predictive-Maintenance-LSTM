@@ -49,14 +49,15 @@ def test_xjtu_bearing_folder_without_snapshots_raises(tmp_path):
     empty = tmp_path / "35Hz12kN" / "Bearing1_1"
     empty.mkdir(parents=True)
     with pytest.raises(FileNotFoundError, match="no snapshot CSVs"):
-        XJ._bearing_frame(empty, 1, (0, 35.0, 12.0))
+        # _bearing_frame takes the config since §52 (the feature mode selects channels).
+        XJ._bearing_frame(empty, 1, (0, 35.0, 12.0), Config(dataset="XJTU-SY"))
 
 
 def test_xjtu_single_column_snapshot_raises(tmp_path):
     bdir = tmp_path / "35Hz12kN" / "Bearing1_1"
     _write_bearing(bdir, n_snapshots=2, columns=1)
     with pytest.raises(ValueError, match="expected 2 columns"):
-        XJ._bearing_frame(bdir, 1, (0, 35.0, 12.0))
+        XJ._bearing_frame(bdir, 1, (0, 35.0, 12.0), Config(dataset="XJTU-SY"))
 
 
 def test_xjtu_descend_gives_up_on_an_unrelated_tree(tmp_path):

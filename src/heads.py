@@ -43,6 +43,32 @@ def bin_to_rul(bin_idx: np.ndarray, config: Config) -> np.ndarray:
     return (np.asarray(bin_idx, dtype=np.float64) + 0.5) * bin_width(config)
 
 
+# The censored/alarm arm (RESEARCH_PLAN §4; CHANGES.md §54). Unlike every other arm it
+# predicts a PROBABILITY, not a RUL in cycles, so its outputs are scored by
+# evaluate.alarm_metrics and are NEVER tabled against NASA/RMSE (non-comparability).
+ALARM_LOSS = "failure_within_horizon"
+
+
+def is_alarm_loss(loss_type: str) -> bool:
+    """True for the binary censoring-aware arm, whose predictions are probabilities
+    rather than RUL -- the one arm decoded and scored on a different scale."""
+    return loss_type == ALARM_LOSS
+
+
+def alarm_targets(targets_rul, config: Config):
+    """Binary alarm target read off the RUL label: 1 iff the intervention falls within
+    ``config.alarm_horizon`` cycles. Deriving it here (rather than plumbing a second
+    label through the cache) keeps ONE target array end to end; the censored rows whose
+    label is unknowable were already dropped upstream (``data.add_alarm_label``), and
+    ``Config`` guarantees ``alarm_horizon < max_rul`` so RUL clipping cannot erase the
+    distinction."""
+    if config.alarm_horizon is None:
+        raise ValueError(
+            f"loss {ALARM_LOSS!r} requires config.alarm_horizon to be set (it defines "
+            f"'within how many cycles?'). Set it on the censored dataset's config.")
+    return (targets_rul <= float(config.alarm_horizon)).to(targets_rul.dtype)
+
+
 def head_output_dim(loss_type: str, config: Config) -> int:
     if loss_type == "mse":
         return 1
@@ -50,6 +76,8 @@ def head_output_dim(loss_type: str, config: Config) -> int:
         return config.num_bins - 1  # CORN emits num_classes-1 logits (coral_pytorch)
     if loss_type == "quantile":
         return len(config.quantile_levels)
+    if loss_type == ALARM_LOSS:
+        return 1  # one logit -> P(intervention within alarm_horizon)
     raise ValueError(f"unknown loss_type: {loss_type!r}")
 
 
@@ -108,6 +136,10 @@ def compute_loss(
     if loss_type == "quantile":
         target = targets_rul / config.max_rul if config.scale_targets else targets_rul
         return pinball_loss(outputs, target, config.quantile_levels)
+    if loss_type == ALARM_LOSS:
+        # Binary cross-entropy on one logit (numerically-stable fused form).
+        return nn.functional.binary_cross_entropy_with_logits(
+            outputs.squeeze(-1), alarm_targets(targets_rul, config))
     raise ValueError(f"unknown loss_type: {loss_type!r}")
 
 
@@ -128,7 +160,16 @@ def corn_expected_rank(logits: torch.Tensor) -> torch.Tensor:
 
 
 def decode(outputs: torch.Tensor, loss_type: str, config: Config) -> np.ndarray:
-    """Raw head outputs -> predicted RUL (numpy, clipped to [0, max_rul])."""
+    """Raw head outputs -> predicted RUL (numpy, clipped to [0, max_rul]).
+
+    EXCEPTION -- the ``failure_within_horizon`` arm returns a PROBABILITY in [0, 1],
+    not a RUL: it answers a different question on a different scale, and its outputs
+    are scored by ``evaluate.alarm_metrics`` and never tabled against RUL metrics
+    (§54). Callers distinguish the two with ``heads.is_alarm_loss``."""
+    if is_alarm_loss(loss_type):
+        with torch.no_grad():
+            prob = torch.sigmoid(outputs.squeeze(-1))
+        return prob.detach().cpu().numpy().astype(np.float64)
     with torch.no_grad():
         if loss_type == "mse":
             pred = outputs.squeeze(-1)

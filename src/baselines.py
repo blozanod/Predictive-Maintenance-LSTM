@@ -321,6 +321,101 @@ class LSTMBaseline(_TorchBaseline):
 
 
 # ---------------------------------------------------------------------------
+# Alarm (binary) baselines -- the competitor bar for the CENSORED chapter (§54)
+#
+# The censored real fleets score a different question ("will this unit reach an
+# intervention within alarm_horizon cycles?"), so their comparators must emit
+# PROBABILITIES, not RUL. These share the same Baseline interface -- ``fit`` takes the
+# binary label in place of the RUL label and ``predict`` returns a probability in
+# [0, 1] -- so the sweep machinery, the win-rule and the restart keys are all reused
+# unchanged. They deliberately never call ``_clip`` (which is in RUL units).
+# ---------------------------------------------------------------------------
+class AlarmBaseRateBaseline(Baseline):
+    """Predict the TRAINING base rate for every window -- the alarm arm's floor.
+
+    Its AUROC is 0.5 and its Brier score is the label variance, by construction: the
+    "you learned nothing about which unit fails" reference that makes a hollow win
+    detectable (the role ``predict_mean`` plays for the RUL arms)."""
+    name = "alarm_base_rate"
+
+    def __init__(self, config: Config, seed: int = 0):
+        self.config = config
+        self._rate = 0.0
+
+    def fit(self, train_windows, train_labels, val_windows=None, val_labels=None):
+        self._rate = float(np.mean(np.asarray(train_labels, np.float64)))
+        return self
+
+    def predict(self, windows) -> np.ndarray:
+        return np.full(len(windows), self._rate, np.float64)
+
+
+class _ClassifierBaseline(Baseline):
+    """LightGBM CLASSIFIER over a per-window feature function -- the alarm twin of
+    ``GBMBaseline`` / ``Catch22GBMBaseline``. Subclasses supply ``_features``.
+
+    ``predict`` returns ``predict_proba``'s positive-class column. A training split
+    that happens to contain ONE class (routine under heavy imbalance: a low-data cell
+    may sample only healthy units) cannot fit a classifier, so it degrades to that
+    constant rate with the same interface rather than raising -- the honest answer,
+    and it keeps a sweep cell from dying on an unlucky draw."""
+
+    def __init__(self, config: Config, seed: int = 0):
+        self.config = config
+        self.seed = seed
+        self._model = None
+        self._constant = None
+
+    @staticmethod
+    def _features(windows: np.ndarray) -> np.ndarray:
+        raise NotImplementedError
+
+    def fit(self, train_windows, train_labels, val_windows=None, val_labels=None):
+        from lightgbm import LGBMClassifier  # reuse reference impl (Task 2.1)
+        y = np.asarray(train_labels, np.float64)
+        if np.unique(y).size < 2:
+            self._constant = float(y[0]) if y.size else 0.0
+            return self
+        self._constant = None
+        Xtr = self._features(train_windows)
+        self._model = LGBMClassifier(random_state=self.seed, n_estimators=500,
+                                     learning_rate=0.05, verbose=-1, n_jobs=-1)
+        fit_kw = {}
+        if val_windows is not None and len(val_windows) and np.unique(
+                np.asarray(val_labels, np.float64)).size >= 2:
+            fit_kw["eval_set"] = [(self._features(val_windows), val_labels)]
+        self._model.fit(Xtr, y, **fit_kw)
+        return self
+
+    def predict(self, windows) -> np.ndarray:
+        if self._constant is not None:
+            return np.full(len(windows), self._constant, np.float64)
+        proba = self._model.predict_proba(self._features(windows))
+        return np.asarray(proba[:, 1], np.float64)
+
+
+class AlarmGBMBaseline(_ClassifierBaseline):
+    """Window statistics -> LightGBM classifier: the industrial default for the alarm
+    question, and the toughest cheap bar the TSFM head must clear on a censored fleet."""
+    name = "alarm_gbm"
+
+    @staticmethod
+    def _features(windows: np.ndarray) -> np.ndarray:
+        return window_statistics(windows)
+
+
+class AlarmCatch22GBMBaseline(_ClassifierBaseline):
+    """catch22 indicators -> LightGBM classifier: the hand-crafted-indicator foil (RQ-D)
+    carried onto the censored fleets, so "are indicators enough?" is asked of the alarm
+    question too, not only of RUL regression."""
+    name = "alarm_catch22_gbm"
+
+    @staticmethod
+    def _features(windows: np.ndarray) -> np.ndarray:
+        return catch22_features(windows)
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 BASELINES = {
@@ -330,7 +425,16 @@ BASELINES = {
     "catch22_gbm": Catch22GBMBaseline,
     "cnn": CNNBaseline,
     "lstm": LSTMBaseline,
+    # Alarm (binary) arm -- censored fleets only (§54).
+    "alarm_base_rate": AlarmBaseRateBaseline,
+    "alarm_gbm": AlarmGBMBaseline,
+    "alarm_catch22_gbm": AlarmCatch22GBMBaseline,
 }
+
+# The alarm-arm baselines: they consume the BINARY label and emit probabilities, so a
+# sweep must never mix them with the RUL baselines (different target, different metric
+# columns). Named here so the runners can assert the roster matches the arm.
+ALARM_BASELINES = frozenset({"alarm_base_rate", "alarm_gbm", "alarm_catch22_gbm"})
 
 
 def make_baseline(name: str, config: Config, seed: int = 0) -> Baseline:

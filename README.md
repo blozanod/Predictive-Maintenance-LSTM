@@ -10,10 +10,14 @@ centerpiece. **The plan is the source of truth**; deviations are logged in
 
 ```
 Data/            One root housing every raw dataset (config.data_root); only the
-  CMAPSSData/    small C-MAPSS text files are committed. Drop XJTU-SY (Data/XJTU-SY/)
-  XJTU-SY/       and N-CMAPSS (Data/N-CMAPSS/, the .h5 files flat) here — they are
-  N-CMAPSS/      git-ignored. XJTU-SY also loads under its zip name
-                 (XJTU-SY_Bearing_Datasets) or one nesting level down.
+  CMAPSSData/    small C-MAPSS text files are committed. Everything else is git-ignored
+  XJTU-SY/       — drop each download in its own subfolder:
+  N-CMAPSS/        XJTU-SY/     the 3 condition folders (also accepts the zip's own
+  MetroPT-3/                    name XJTU-SY_Bearing_Datasets, or one nesting level down)
+  Hydraulic/       N-CMAPSS/    the .h5 files, flat
+  Backblaze/       MetroPT-3/   MetroPT3(AirCompressor).csv (MetroPT3.csv also accepted)
+                   Hydraulic/   the 17 sensor .txt files + profile.txt
+                   Backblaze/   the daily YYYY-MM-DD.csv files (any nesting)
 src/
   config.py      Single Config dataclass: seeds, max_rul, window, tsfm_context_length,
                  head_features, pooling, unit-count grid, paths (data_root +
@@ -23,8 +27,13 @@ src/
                  "DECISION (uncited)".
   datasets/      Raw loaders, one module per dataset family, behind a registry:
     cmapss.py    C-MAPSS FD001–FD004 (subdir CMAPSSData); xjtu.py XJTU-SY bearings
-    xjtu.py      (subdir XJTU-SY); ncmapss.py N-CMAPSS DS01–DS08d + the combined
-    ncmapss.py   DSALL fleet (subdir N-CMAPSS, .h5 → per-cycle aggregates, cached).
+    xjtu.py      (subdir XJTU-SY) with the RQ-D raw-vs-indicators feature mode
+    ncmapss.py   (CHANGES.md §52); ncmapss.py N-CMAPSS DS01–DS08c + the combined DSALL
+    metropt.py   fleet (.h5 → per-cycle aggregates, cached) with the RQ-G aggregation
+    hydraulic.py knobs (§53); metropt.py MetroPT-3 (real, CENSORED: intervention-run
+    backblaze.py units + alarm target, §54); hydraulic.py UCI Hydraulic (real rig, the
+                 RQ-F adjust-vs-replace anchor with native graded severity, §55);
+                 backblaze.py Backblaze Drive Stats (real, censored, fleet-scale, §56).
                  __init__.load_raw dispatches by config.dataset_kind();
                  base.resolve_data_dir maps data_root + subdir candidates (or a
                  data_dir override), tolerating alternate names + one nesting level.
@@ -65,8 +74,12 @@ src/
   transfer.py    cost curves, §37); transfer.py cold-start transfer.
   scoring.py     The win-rule (§36): strongest-baseline-per-cell, win/tie/loss/hollow
                  verdicts, and the success_map object plots.py renders.
-  probes.py      Factor-probe harness (§38): run_factor_probe (channels/noise/… factor
-                 sweeps with the reduced roster) + probe_roster.
+  probes.py      Factor-probe harness (§38): run_factor_probe (channels/noise/feature_
+                 mode/aggregation factor sweeps with the reduced roster) + probe_roster.
+                 CHANNEL_SET_FACTORS re-resolve sensor_columns per level (§52).
+  taxonomy.py    RQ-F few-shot adjust-vs-replace probe on FROZEN embeddings (§55):
+                 k labels per class → linear probe, embedding vs catch22 vs window
+                 stats; the gap between those curves is the RQ-F answer.
   zeroshot.py    Zero-shot health-index forecasting (RQ-Z, §39): no head, threshold
                  crossing → RUL, forecaster_factory seam.
   plots.py       Stage C figures + the v2 success-map / earliness / cost-curve /
@@ -77,8 +90,11 @@ notebooks/       One notebook per dataset family, each self-cloning the repo fro
   cmapss.ipynb   and pointing at Drive for data/cache/results only — so they run in
   xjtu.ipynb     PARALLEL on separate Colab runtimes. Each: Setup (clone + mount) →
   ncmapss.ipynb  Config → Campaign (run_campaign restricted to that family). cmapss.ipynb
-                 also carries the gated FD001 deep-dives (ablation → winner, sweep,
-                 raised-cap, transfer, plots).
+  phase_b.ipynb  also carries the gated FD001 deep-dives (ablation → winner, sweep,
+                 raised-cap, transfer, plots). phase_b.ipynb runs the three REAL
+                 industrial datasets (MetroPT-3 · Hydraulic · Backblaze) and scores the
+                 two chapters they produce instead of a RUL curve: the censored
+                 alarm/lead-time metric and the RQ-F few-shot taxonomy probe (§54–§56).
   verify/        One notebook per backbone: install its isolated requirements/<model>.txt
                  and run the weight-level GPU spike (scripts/verify_backbones_colab.py).
   campaign/      The cross-TSFM C-MAPSS campaign (CHANGES.md §45): Stage A per model
@@ -134,16 +150,50 @@ never mirror or re-upload the repo. Open one (or several at once) and hit **Run 
    `results/` are written there too. Defaults are the recorded FD001 ablation winner
    (CHANGES.md §12).
 3. **Campaign** — `run_campaign(config, datasets=…)` restricted to that family: C-MAPSS
-   FD001–FD004 · XJTU-SY · N-CMAPSS DS01–DS08c + the combined DSALL fleet. Per combo it runs
-   Stage A cache → data-scaling sweep → fairness arms → horizon eval → saved figures, each
-   stage restartable. Per-dataset protocol choices come from
-   `campaign.DEFAULT_DATASET_OVERRIDES` (CHANGES.md §30). Datasets not downloaded into
-   `Data/` are skipped with a notice; every artifact is named `<dataset>_<model>_…`
-   (e.g. `results/FD002_chronos-2_results_v2.csv`).
+   FD001–FD004 · XJTU-SY · N-CMAPSS DS01–DS08c + the combined DSALL fleet · MetroPT-3 ·
+   Hydraulic · Backblaze. Per combo it runs Stage A cache → data-scaling sweep → fairness
+   arms → horizon eval → saved figures, each stage restartable. Per-dataset protocol
+   choices come from `campaign.DEFAULT_DATASET_OVERRIDES` (CHANGES.md §30, §54–§56).
+   Datasets not downloaded into `Data/` are skipped with a notice; every artifact is named
+   `<dataset>_<model>_…` (e.g. `results/FD002_chronos-2_results_v2.csv`).
+
+   **Censored fleets take a different route.** MetroPT-3 and Backblaze are mostly-healthy
+   fleets with right-censored survivors, so `config.is_censored_dataset()` sends them to
+   the binary **alarm** sweep (“will this unit need an intervention within
+   `alarm_horizon` cycles?”) writing **`alarm_results.csv`** — a *different file* from
+   `results_v2.csv`, because the alarm metrics (precision/recall/AUROC + lead time) share
+   no scale with the RUL ones and must never be tabled together. The RUL-only `fairness`
+   and `horizon` stages are skipped with a printed notice (CHANGES.md §54).
 4. **Deep-dives** (in `cmapss.ipynb` only; optional — set `RUN_DEEP_DIVES = True` in its
    Config cell) — the single-dataset FD001 studies: the context/feature ablation, learning
    curves, the CORN-vs-MSE paired-significance table, the raised-label-cap arm (max_rul=200),
    and the FD001→FD003 cold-start transfer.
+
+### Phase B — the three real industrial datasets (`notebooks/phase_b.ipynb`, CHANGES.md §54–§56)
+
+`notebooks/phase_b.ipynb` runs MetroPT-3, UCI Hydraulic and Backblaze on one runtime.
+**They do not all produce a RUL curve, by design** — `run_campaign` routes each to the arm
+its physics supports:
+
+| dataset | what it is | arm the campaign runs | headline artifact |
+|---|---|---|---|
+| **MetroPT-3** (UCI 791) | real metro-train APU; 4 documented air-leak events + a right-censored tail | binary **alarm** sweep | `*_alarm_results.csv` + alarm-scaling figures |
+| **Backblaze** Drive Stats | real drive fleet; ~1 in 23,500 drive-days fails, most drives censored | binary **alarm** sweep | `*_alarm_results.csv` + alarm-scaling figures |
+| **UCI Hydraulic** (447) | real rig with **no failure events at all** (faults are injected and held) | **RQ-F taxonomy probe** | `*_taxonomy.csv` + the few-shot curve |
+
+Two consequences worth knowing before reading any number:
+
+- **Alarm metrics are never tabled against RUL ones.** Precision/recall/AUROC + lead time
+  share no scale with RMSE/NASA, so they go to a *different CSV* and the win-rule scores
+  them in the reversed direction (they are skill scores, not errors). The RUL-only
+  `fairness` and `horizon` stages are skipped with a printed notice.
+- **Hydraulic's RUL is degenerate by construction** — its label blocks are uniformly sized,
+  so `rul_truth` comes out constant and the predict-the-mean floor scores a perfect 0.0.
+  The loader warns, and the campaign runs the RQ-F probe for it instead.
+
+Each unit means something different per dataset (MetroPT: an intervention run, in binned
+*hours*; Hydraulic: a constant-fault label block, in 60 s rig cycles; Backblaze: one drive,
+in observed *drive-days*), so read every horizon and lead time in that dataset's own units.
 
 ### Cross-TSFM C-MAPSS campaign (`notebooks/campaign/`, CHANGES.md §45)
 
