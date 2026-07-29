@@ -18,6 +18,15 @@ sktime>=1.0              # MiniRocketMultivariate
 numba>=0.59              # required by sktime's MiniRocket
 pycatch22>=0.4           # catch22 features for the catch22_gbm baseline (Lubba et al. 2019); tests use it
 
+# --- Phase-B real datasets (CHANGES.md §54-§56) ---
+pyarrow>=14.0            # Backblaze Drive Stats: multi-GB daily SMART CSVs (src/datasets/backblaze.py)
+# NOTE on scikit-survival / lifelines: IMPLEMENTATION_PLAN §2 pencilled them in for the
+# censored arm, but the arm as built (§54) uses a FIXED-HORIZON BINARY target
+# (`failure_within_horizon`) scored with precision/recall/AUROC + lead time — the plan's
+# own §6.3 design — so no survival-analysis library is imported anywhere. They are
+# deliberately NOT listed: an unused heavy dependency is worse than a missing one.
+# `evaluate.package_versions()` keeps reporting them "not-installed" by design (§32).
+
 # --- foundation model (GPU; Stage A only) ---
 chronos-forecasting>=2.0.0   # official Chronos2Pipeline.embed()
 safetensors>=0.4

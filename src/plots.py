@@ -45,7 +45,8 @@ _FALLBACK_COLORS = ["#56B4E9", "#F0E442", "#000000"]
 _LOSS_LINESTYLE = {"mse": "-", "corn": "--", "quantile": ":", "native": "-", "": "-"}
 # Floors are drawn as flat reference lines and excluded from y-limits.
 _FLOOR_STYLE = {"predict_mean": ("predict-mean floor", ":"),
-                "cycle_reg": ("cycle-age floor (linear)", "-.")}
+                "cycle_reg": ("cycle-age floor (linear)", "-."),
+                "alarm_base_rate": ("base-rate floor", ":")}
 
 
 def _series_style(label: str) -> dict:
@@ -658,4 +659,153 @@ def plot_cross_tsfm(
     ax.legend(fontsize=8, framealpha=0.9, title="aggregation")
     saved = _save(fig, out_dir, f"cross_tsfm_{metric}", prefix)
     plt.show() if show else plt.close(fig)
+    return saved
+
+
+# ---------------------------------------------------------------------------
+# The censored / alarm chapter (CHANGES.md §54) and the RQ-F taxonomy probe (§55)
+# ---------------------------------------------------------------------------
+def plot_alarm_scaling(
+    alarm_csv: str | Path,
+    out_dir: str | Path,
+    metrics: Optional[list[tuple[str, str]]] = None,
+    show: bool = True,
+    prefix: str = "",
+) -> list[Path]:
+    """The censored fleets' data-scaling figure: alarm skill vs. training units.
+
+    The twin of ``plot_data_scaling`` for ``alarm_results.csv``, and deliberately a
+    SEPARATE function reading a SEPARATE file -- the alarm metrics share no scale with
+    the RUL ones, so they must never land on one axis (RESEARCH_PLAN §8). These are
+    SKILL scores (higher is better), so the y-axis is not inverted and the base-rate
+    floor is drawn as a reference line rather than a competitor."""
+    out_dir = Path(out_dir)
+    metrics = metrics or [
+        ("alarm_ap", "average precision (alarm)"),
+        ("alarm_auroc", "AUROC (alarm)"),
+        ("alarm_recall", f"recall at the operating threshold"),
+        ("alarm_mean_lead_time", "mean lead time bought (cycles)"),
+    ]
+    all_rows = load_results(alarm_csv)
+    datasets = sorted({r.get("dataset", "") for r in all_rows})
+    saved: list[Path] = []
+    for ds in datasets:
+        ds_tag = f"{ds}_" if len(datasets) > 1 and ds else ""
+        for metric, ylabel in metrics:
+            series: dict[str, dict[int, list[float]]] = {}
+            for r in all_rows:
+                if r.get("dataset", "") != ds or r.get(metric) in (None, ""):
+                    continue
+                value = float(r[metric])
+                if value != value:            # nan: a degenerate cell, not a datum
+                    continue
+                series.setdefault(str(r["model"]), {}).setdefault(
+                    int(r["n_units"]), []).append(value)
+            if not series:
+                continue
+            fig, ax = plt.subplots(figsize=(7.5, 5))
+            all_ns: set = set()
+            for label in sorted(series):
+                by_n = series[label]
+                ns = np.array(sorted(by_n))
+                mean = np.array([float(np.mean(by_n[n])) for n in ns])
+                std = np.array([float(np.std(by_n[n])) for n in ns])
+                all_ns.update(int(n) for n in ns)
+                if label in _FLOOR_STYLE:
+                    floor_label, floor_ls = _FLOOR_STYLE[label]
+                    ax.axhline(float(np.mean(mean)), color="#888888", ls=floor_ls,
+                               lw=1.2, label=floor_label)
+                    continue
+                st = _series_style(label)
+                ax.plot(ns, mean, lw=2, ms=5, label=label, **st)
+                ax.fill_between(ns, mean - std, mean + std, color=st["color"],
+                                alpha=0.15, lw=0)
+            _unit_count_xaxis(ax, all_ns)
+            ax.set_xlabel("training units (drives / intervention runs)")
+            ax.set_ylabel(ylabel)
+            ax.set_title(f"Alarm scaling ({ds or 'unknown dataset'}) — {ylabel}")
+            ax.grid(alpha=0.25)
+            ax.legend(fontsize=8, framealpha=0.9)
+            saved += _save(fig, out_dir, f"alarm_scaling_{ds_tag}{metric}", prefix)
+            plt.show() if show else plt.close(fig)
+    return saved
+
+
+def plot_alarm_threshold_curve(
+    sweep_rows: list[dict],
+    out_dir: str | Path,
+    show: bool = True,
+    prefix: str = "",
+    name: str = "alarm_threshold_curve",
+) -> list[Path]:
+    """Precision and recall against the alarm threshold -- the alarm arm's answer to the
+    cost curve: the whole operating trade-off, not one arbitrary cut point. ``sweep_rows``
+    is what ``evaluate.alarm_threshold_sweep`` returns."""
+    out_dir = Path(out_dir)
+    thresholds = [float(r["threshold"]) for r in sweep_rows]
+    fig, ax = plt.subplots(figsize=(7, 4.6))
+    for key, label, color in (("alarm_precision", "precision", "#0072B2"),
+                              ("alarm_recall", "recall", "#D55E00"),
+                              ("alarm_f1", "F1", "#009E73")):
+        ax.plot(thresholds, [float(r[key]) for r in sweep_rows], lw=2,
+                marker="o", ms=4, color=color, label=label)
+    ax.set_xlabel("alarm threshold (predicted probability)")
+    ax.set_ylabel("score")
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_title("Alarm operating curve")
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8, framealpha=0.9)
+    saved = _save(fig, out_dir, name, prefix)
+    plt.show() if show else plt.close(fig)
+    return saved
+
+
+def plot_taxonomy(
+    taxonomy_csv: str | Path,
+    out_dir: str | Path,
+    metric: str = "macro_f1",
+    show: bool = True,
+    prefix: str = "",
+) -> list[Path]:
+    """The RQ-F few-shot curve: separability of adjustment-vs-replacement against the
+    number of LABELLED EXAMPLES PER CLASS, one line per feature source (TSFM embedding
+    vs. catch22 indicators vs. window statistics). The gap between the embedding line
+    and the indicator line IS the RQ-F answer."""
+    out_dir = Path(out_dir)
+    rows = load_results(taxonomy_csv)
+    saved: list[Path] = []
+    labels = sorted({r.get("label", "") for r in rows})
+    for label in labels:
+        series: dict[str, dict[int, list[float]]] = {}
+        for r in rows:
+            if r.get("label", "") != label or r.get(metric) in (None, ""):
+                continue
+            value = float(r[metric])
+            if value != value:
+                continue
+            series.setdefault(str(r["feature_source"]), {}).setdefault(
+                int(r["shots"]), []).append(value)
+        if not series:
+            continue
+        fig, ax = plt.subplots(figsize=(7, 4.8))
+        for source in sorted(series):
+            by_k = series[source]
+            ks = np.array(sorted(by_k))
+            mean = np.array([float(np.mean(by_k[k])) for k in ks])
+            std = np.array([float(np.std(by_k[k])) for k in ks])
+            st = _series_style(source)
+            ax.plot(ks, mean, lw=2, ms=5, label=source, **st)
+            ax.fill_between(ks, mean - std, mean + std, color=st["color"],
+                            alpha=0.15, lw=0)
+        ax.set_xscale("log")
+        ax.set_xticks(sorted({int(k) for by_k in series.values() for k in by_k}))
+        ax.get_xaxis().set_major_formatter(plt.matplotlib.ticker.ScalarFormatter())
+        ax.minorticks_off()
+        ax.set_xlabel("labelled examples per class")
+        ax.set_ylabel(metric)
+        ax.set_title(f"RQ-F few-shot separability — {label}")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=8, framealpha=0.9, title="feature source")
+        saved += _save(fig, out_dir, f"taxonomy_{label}_{metric}", prefix)
+        plt.show() if show else plt.close(fig)
     return saved

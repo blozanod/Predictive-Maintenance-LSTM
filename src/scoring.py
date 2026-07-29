@@ -49,23 +49,54 @@ SECONDARY_METRIC = "rmse_clipped"
 BASELINE_MODELS = frozenset({
     "predict_mean", "gbm", "minirocket", "cnn", "lstm",
     "cycle_reg", "gbm_age", "catch22_gbm",
+    # The censored/alarm arm's comparators (CHANGES.md §54): they emit probabilities
+    # and are scored on the alarm metrics, but the win-rule machinery is identical.
+    "alarm_base_rate", "alarm_gbm", "alarm_catch22_gbm",
 })
 # Suffixes that mark a TSFM row under test (as opposed to a baseline comparator).
-TSFM_SUFFIXES = ("_mlp", "_zeroshot")
+TSFM_SUFFIXES = ("_mlp", "_zeroshot", "_probe")
 # The trivial FLOORS (RESEARCH_PLAN §6: "+ floors: predict-mean, cycle-count linear
 # regression"). They are the usability guard, NOT competitors -- a TSFM that beats
 # every real baseline but not the trivial floor is a hollow win.
 # DECISION (uncited): treating predict_mean/cycle_reg as floors (not part of the
 # "strongest baseline" competitor bar) is what makes the hollow guard reachable;
 # RESEARCH_PLAN §6 lists them as floors, apart from the competitor baselines.
-FLOOR_MODELS = frozenset({"predict_mean", "cycle_reg"})
-# The absolute-floor reference model (the "everything fails" guard).
+# ``alarm_base_rate`` is the same idea for the censored arm: predicting the fleet's
+# base rate for every window is that arm's "you learned nothing" reference.
+FLOOR_MODELS = frozenset({"predict_mean", "cycle_reg", "alarm_base_rate"})
+# The absolute-floor reference models for the hollow guard, in preference order: the
+# first one PRESENT in a cell is used, so a RUL cell guards against predict_mean and an
+# alarm cell against alarm_base_rate without the caller having to say which arm it is.
+FLOOR_MODEL_PREFERENCE = ("predict_mean", "alarm_base_rate")
+# Back-compat alias: the RUL arm's floor (the historical single-model constant).
 FLOOR_MODEL = "predict_mean"
+
+# Metrics where a HIGHER value is better. Every RUL metric is an error (lower is
+# better), which the win-rule assumed throughout; the censored/alarm arm (§54) and the
+# RQ-F taxonomy probe (§55) instead report skill scores, where the comparison must be
+# reversed. Getting this wrong would silently invert every alarm verdict, so the
+# direction is resolved in ONE place and used by both the "strongest bar" selection and
+# the margin's sign.
+HIGHER_IS_BETTER_METRICS = frozenset({
+    # alarm arm (evaluate.ALARM_METRIC_FIELDS, minus the error-like ones)
+    "alarm_precision", "alarm_recall", "alarm_f1", "alarm_specificity",
+    "alarm_auroc", "alarm_ap",
+    "alarm_mean_lead_time", "alarm_median_lead_time", "alarm_min_lead_time",
+    # RQ-F taxonomy probe (src/taxonomy.py)
+    "accuracy", "macro_f1", "auroc",
+})
+
+
+def metric_is_higher_better(metric: str) -> bool:
+    """True iff a LARGER value of ``metric`` is a BETTER result. Errors (RMSE/MAE/NASA,
+    and the alarm arm's Brier score) are lower-better; skill scores are higher-better."""
+    return metric in HIGHER_IS_BETTER_METRICS
 
 
 def is_tsfm_model(model: str) -> bool:
-    """A TSFM row under test -- a trained head (``<tag>_mlp``) or the zero-shot arm
-    (``<tag>_zeroshot``, RQ-Z) -- as opposed to a baseline comparator."""
+    """A TSFM row under test -- a trained head (``<tag>_mlp``), the zero-shot arm
+    (``<tag>_zeroshot``, RQ-Z) or the few-shot taxonomy probe (``<tag>_probe``, RQ-F) --
+    as opposed to a baseline comparator."""
     return str(model).endswith(TSFM_SUFFIXES)
 
 
@@ -94,18 +125,19 @@ def _grouped_seed_values(rows: Iterable[dict], metric: str,
 
 def _strongest_by_predicate(
     grouped: dict[tuple, dict[str, dict[int, float]]], comparator,
+    higher_is_better: bool = False,
 ) -> dict[tuple, tuple[str, float]]:
     """``{cell: (best_model, best_seed_mean)}`` over the models satisfying
-    ``comparator`` (the lowest seed-mean; lower is better). Cells with no such model
-    are omitted -- there is no bar to clear."""
+    ``comparator`` -- the BEST seed-mean in the metric's own direction. Cells with no
+    such model are omitted -- there is no bar to clear."""
     out: dict[tuple, tuple[str, float]] = {}
     for cell, by_model in grouped.items():
-        best_model, best_mean = None, np.inf
+        best_model, best_mean = None, (-np.inf if higher_is_better else np.inf)
         for model, seedvals in by_model.items():
             if not comparator(model):
                 continue
             mean = _seed_mean(seedvals)
-            if mean < best_mean:
+            if (mean > best_mean) if higher_is_better else (mean < best_mean):
                 best_model, best_mean = model, mean
         if best_model is not None:
             out[cell] = (best_model, best_mean)
@@ -118,10 +150,11 @@ def strongest_baseline_per_cell(
     cell_fields: tuple[str, ...] = ("dataset", "n_units"),
 ) -> dict[tuple, tuple[str, float]]:
     """``{cell: (best_baseline_name, best_seed_mean)}`` -- the toughest COMPETITOR
-    baseline bar in each cell (the lowest baseline seed-mean; lower is better; floors
-    excluded)."""
+    baseline bar in each cell (the best baseline seed-mean in ``metric``'s own
+    direction; floors excluded)."""
     return _strongest_by_predicate(
-        _grouped_seed_values(rows, metric, cell_fields), is_competitor_baseline)
+        _grouped_seed_values(rows, metric, cell_fields), is_competitor_baseline,
+        metric_is_higher_better(metric))
 
 
 def _classify(margin: float, p: float, config: Config) -> str:
@@ -157,32 +190,41 @@ def win_verdict(
     §4.5): the best floor becomes the bar and the hollow guard is moot (beating a floor
     is the whole point), so it is skipped."""
     rows = list(rows)
+    higher_better = metric_is_higher_better(metric)
     grouped = _grouped_seed_values(rows, metric, cell_fields)
     comparator = ((lambda m: m in FLOOR_MODELS) if compare_to_floors
                   else is_competitor_baseline)
-    strongest = _strongest_by_predicate(grouped, comparator)
+    strongest = _strongest_by_predicate(grouped, comparator, higher_better)
     out: dict[tuple, dict] = {}
     for cell, by_model in grouped.items():
         if cell not in strongest:
             continue
         best_baseline, baseline_mean = strongest[cell]
         base_seedvals = by_model[best_baseline]
-        floor = _seed_mean(by_model[FLOOR_MODEL]) if FLOOR_MODEL in by_model else None
+        # Hollow-guard reference: the first floor PRESENT in this cell, so a RUL cell
+        # guards against predict_mean and an alarm cell against alarm_base_rate.
+        floor_model = next((m for m in FLOOR_MODEL_PREFERENCE if m in by_model), None)
+        floor = _seed_mean(by_model[floor_model]) if floor_model is not None else None
         for model, seedvals in by_model.items():
             if not is_tsfm_model(model):
                 continue
             tsfm_mean = _seed_mean(seedvals)
-            margin = baseline_mean - tsfm_mean          # >0 => TSFM beats the bar
+            # Signed so POSITIVE always means "the TSFM is better", in either direction.
+            margin = ((tsfm_mean - baseline_mean) if higher_better
+                      else (baseline_mean - tsfm_mean))
             shared = sorted(set(seedvals) & set(base_seedvals))
             _t, p = paired_ttest([seedvals[s] for s in shared],
                                  [base_seedvals[s] for s in shared])
             verdict = _classify(margin, p, config)
             # Absolute-floor guard: a "win" where the TSFM is no better than the
-            # trivial predict-mean floor is hollow (everything fails there). Moot when
-            # the floors ARE the bar (compare_to_floors), so skipped there.
-            if (verdict == "win" and not compare_to_floors and floor is not None
-                    and tsfm_mean >= floor - config.win_margin):
-                verdict = "hollow"
+            # trivial floor is hollow (everything fails there). Moot when the floors
+            # ARE the bar (compare_to_floors), so skipped there.
+            if verdict == "win" and not compare_to_floors and floor is not None:
+                no_better_than_floor = (tsfm_mean <= floor + config.win_margin
+                                        if higher_better
+                                        else tsfm_mean >= floor - config.win_margin)
+                if no_better_than_floor:
+                    verdict = "hollow"
             out[cell + (model,)] = {
                 "verdict": verdict, "margin": float(margin), "p": float(p),
                 "tsfm_mean": tsfm_mean, "best_baseline": best_baseline,

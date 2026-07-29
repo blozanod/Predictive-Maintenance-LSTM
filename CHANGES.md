@@ -1339,11 +1339,463 @@ four notebooks, a new "Milestone-2 completion" subsection describes the three-GP
 + one-core-scoring-pass split, and the coverage-gate paragraph drops its "reports below
 100% by design" phasing note now that the gate is met.
 
+## 52. Milestone 3 — XJTU `xjtu_feature_mode`: raw-vs-indicators (RQ-D)
+The direct test of RESEARCH_PLAN RQ-D — *"do TSFMs make hand-crafted condition
+indicators obsolete?"* — on the one dataset that ships raw waveforms (XJTU-SY: 32768
+samples per axis per minute at 25.6 kHz). Until now `datasets/xjtu.py` emitted ONLY the
+16 hand-crafted indicators, so the question could not be asked.
+
+- **`xjtu_feature_mode ∈ {indicators, raw, raw+indicators}`** (`config.py`, default
+  `indicators` = the historical behaviour). `raw` emits `2 · xjtu_raw_channels` channels
+  (`h_raw_0…`, `v_raw_0…`), `raw+indicators` emits the raw block followed by the 16
+  indicators. `Config.default_sensor_columns()` resolves the channel set from the mode,
+  and `datasets/xjtu.xjtu_channel_columns` is its frame-side twin (same order, asserted
+  in tests) — so switching arms is ONE field, not a hand-copied channel list.
+- **Two documented reductions (`xjtu_raw_reduce`)**, because "raw" alone confounds two
+  different collection choices:
+  - `decimate` (default) — `xjtu_raw_channels` **evenly-spaced real samples**, first and
+    last inclusive. Every emitted number is a reading that was actually taken, so this is
+    subtractive in the strictest sense (RESEARCH_PLAN §1) and is exactly what a
+    practitioner recording at the corresponding lower rate would hold.
+  - `segment_rms` — RMS within each of that many contiguous equal segments, preserving
+    the snapshot's FULL-RATE energy at coarser time resolution: the
+    aggregation-coarsening arm, which is XJTU's RQ-G lever (RESEARCH_PLAN §5).
+  Running both is what separates *"the TSFM lost because of the sampling RATE"* from
+  *"…because of the REPRESENTATION"*. `# DECISION (uncited)` records both.
+- **`xjtu_raw_channels = 16` per axis** (`# DECISION (uncited)`): it puts the raw arm's
+  channel count (32) in the same order of magnitude as the indicator arm's (16), so the
+  comparison is not confounded by a 1000×-wider input.
+- **Fails loud, never fabricates.** `snapshot_raw` raises when a snapshot has fewer
+  samples than the requested width instead of padding or repeating (invariant §7).
+- **Cache keys.** The three fields join the window key **only when the mode is not
+  `indicators`**, and only for the xjtu family — so the recorded XJTU key
+  (`windows_XJTU-SY_97e96700cc2670b4`) and every C-MAPSS/N-CMAPSS key are byte-identical
+  (asserted in `tests/test_cache_keys.py`).
+- **Probe wiring.** `probes.CHANNEL_SET_FACTORS = ("feature_mode", "aggregation")`: these
+  factors change which columns the LOADER emits, but `sensor_columns` is resolved eagerly
+  in `__post_init__` and `replace` carries the resolved list forward — so each level also
+  resets `sensor_columns=None` to re-resolve. Without this the probe would ask the loader
+  for columns it no longer emits. An explicit `sensor_columns` in a level still wins.
+- `_bearing_frame` now takes the `config` (it selects the channel block); the two
+  existing edge tests were updated for the signature and nothing else.
+
+## 53. Milestone 4 — N-CMAPSS aggregation granularity (RQ-G)
+The "how finely must you sample, and how should sub-cycle data be aggregated?" chapter on
+the dataset that has genuine sub-cycle data (1 Hz within each flight).
+
+- **`ncmapss_agg_stride`** (default 1) sub-samples each flight's 1 Hz rows 1-in-N BEFORE
+  the statistics are computed — stride 10 is a 0.1 Hz recorder. Striding is WITHIN each
+  flight (`cumcount % stride == 0`), so row 0 of every flight is always kept and no
+  flight can become empty.
+- **`ncmapss_agg_stats`** (default `mean_std`) selects the per-cycle statistic set from
+  `NCMAPSS_AGG_STAT_SETS`: `mean_std` (37 channels, the historical constant) or
+  `mean_std_minmax_slope` (91). `ncmapss_feature_columns()` derives the names, and
+  `NCMAPSS_FEATURE_COLUMNS` is now that function at the default — byte-identical to the
+  old literal.
+- **`cycle_len_s` stays the FULL 1 Hz row count even under a stride**
+  (`# DECISION (uncited)`): flight duration is observable from the flight's start/end
+  times no matter how fast the sensors were polled, so deriving it from the retained rows
+  would confound the sampling-rate intervention with the silent loss of a duration
+  covariate — two different collection choices.
+- **Slope** is the least-squares slope against the within-flight second index, computed
+  by the algebraic `cov(t,x)/var(t)` identity (no per-group Python loop over millions of
+  rows) with the products frame built in float32 and **only when a slope is requested**,
+  so the default path pays nothing. A group whose `t` has zero variance (a single
+  retained row) gets slope 0.0 — the same convention `std` already uses for 1-row cycles.
+- **The per-file aggregate cache is keyed by the knobs in its FILENAME**
+  (`ncmapss_agg_<ds>_v1[_s<stride>][_<stats>].npz`), so every pre-§53 cache file keeps its
+  exact name and stays valid while each knob combination gets its own coexisting
+  aggregate. `NCMAPSS_AGG_VERSION` still guards changes to the aggregation LOGIC.
+- Both fields join the window key **only when non-default**, ncmapss-only — `DS02` and
+  `DSALL` keys are byte-identical.
+
+## 54. Milestone 5 — the censoring machinery + the alarm target (shared by MetroPT/Backblaze)
+The realistic industrial case RESEARCH_PLAN §4 calls for: a fleet that is **mostly
+healthy**, with rare failures and many right-censored survivors. Forcing RUL regression
+on such a fleet invents a failure date the data does not contain, so a second, censoring-
+aware target is added alongside the RUL spine. Built once here, and consumed by the
+MetroPT-3 loader below and by Backblaze (§56).
+
+### (a) The label: `alarm_horizon` → `failure_within_horizon`
+`data.add_alarm_label` turns "will this unit reach an intervention within H cycles?" into
+a per-row 0/1/NaN label, where `r` is the row's time to the end of its unit's observed run:
+
+| unit | condition | label | why |
+|---|---|---|---|
+| observed event | `r ≤ H` | **1** | the run really ends in an intervention |
+| observed event | `r > H` | **0** | it does, but not yet |
+| right-censored | `r > H` | **0** | provably survived the whole horizon — a genuine negative, so the survivor **does** contribute training signal |
+| right-censored | `r ≤ H` | **NaN** | the horizon runs past the end of observation; whether it failed there is **unknowable** |
+
+The NaN rows are **dropped** (`data.drop_unlabeled_rows`), never guessed. Labelling them 0
+is the classic censoring bug: it teaches "healthy" from absence of evidence and inflates
+precision. `data.EVENT_OBSERVED_COLUMN` is the flag a censored loader emits; every family
+that omits it is treated as "all events observed", so nothing changes for the
+run-to-failure datasets. Standard administrative-censoring treatment for a fixed-horizon
+binary target.
+
+- `alarm_horizon` is a **window-cache-key field** (it changes the labels AND drops rows) —
+  added only when set, so every run-to-failure key is byte-identical.
+- `Config` enforces **`alarm_horizon < max_rul`**: the label is read off the RUL target,
+  which is clipped at `max_rul`, so a horizon at/after the clip point would be invisible.
+
+### (b) The arm: `heads.ALARM_LOSS = "failure_within_horizon"`
+One logit + `binary_cross_entropy_with_logits`. `heads.alarm_targets` derives the binary
+target from the RUL tensor, so the whole pipeline keeps ONE target array end to end and
+the head and the baselines can never disagree about the label. `heads.decode` returns a
+**probability**, not a RUL — the single arm whose output is on a different scale — and
+`heads.is_alarm_loss` is how callers distinguish it.
+
+`train.train_head` early-stops on the validation **BCE** for this arm (an RMSE against RUL
+labels would be meaningless); a new `history["val_score"]` carries the arm's
+early-stopping criterion and equals `val_rmse` exactly for every regression arm, so every
+recorded result is unchanged. `val_rmse` is `nan` on the alarm arm rather than a fake
+number.
+
+### (c) The metric: precision/recall at a lead time, never tabled against NASA
+`evaluate.alarm_metrics` (precision / recall / F1 / specificity at a threshold, plus the
+threshold-free AUROC and average precision and the Brier score),
+`evaluate.alarm_lead_times` (the lead time actually bought on the events that were
+CAUGHT — what turns a recall number into MetroPT's operational requirement), and
+`evaluate.alarm_threshold_sweep` (the whole operating trade-off, the alarm arm's answer to
+the cost curve — no single arbitrary cut point). Degenerate inputs report `nan` rather
+than raising or scoring 0, which is routine under 1-in-23,500 imbalance.
+
+`ALARM_METRIC_FIELDS` is deliberately **disjoint** from `METRIC_FIELDS`, and
+`sweep.run_alarm_sweep` writes **`alarm_results.csv`, a different file** from
+`results_v2.csv` — so alarm and RUL numbers can never be averaged into one table or
+plotted on one axis. RESEARCH_PLAN §8's non-comparability rule is enforced structurally,
+not by convention.
+
+### (d) The competitors: alarm baselines
+`baselines.AlarmBaseRateBaseline` (`alarm_base_rate`) predicts the training base rate —
+AUROC 0.5 by construction, the alarm arm's "you learned nothing" floor, which is what
+makes the hollow guard reachable. `alarm_gbm` and `alarm_catch22_gbm` are LightGBM
+**classifiers** over the window statistics and the catch22 indicator bank respectively
+(so RQ-D's "are indicators enough?" is asked of the alarm question too). A training draw
+containing one class degrades to that constant rate with the same interface instead of
+raising — the honest answer, and it keeps an unlucky low-data cell from killing a sweep.
+
+### (e) The win-rule learns direction
+Alarm and RQ-F metrics are **skill scores (higher is better)**; every RUL metric is an
+error. `scoring.HIGHER_IS_BETTER_METRICS` + `metric_is_higher_better` resolve the
+direction in ONE place, used by both the strongest-bar selection and the margin's sign, so
+`margin > 0` still means "the TSFM is better" in either direction. Getting this wrong
+would have silently inverted every alarm verdict. `FLOOR_MODEL_PREFERENCE` picks the first
+floor PRESENT in a cell (`predict_mean` for RUL, `alarm_base_rate` for alarm), and the
+hollow guard's comparison flips with the direction. `_probe` joins `TSFM_SUFFIXES` for the
+RQ-F rows.
+
+### (f) Campaign routing
+`campaign.RUL_ONLY_STAGES = ("fairness", "horizon")` are **skipped with a notice** on a
+censored fleet (`config.is_censored_dataset()`): `cycle_reg`/`gbm_age` regress RUL on
+elapsed cycles and a censored survivor has no RUL to regress, and the horizon bins are RUL
+bands the alarm arm does not predict. `sweep` routes to `run_alarm_sweep`, and `figures`
+to `plots.plot_alarm_scaling`.
+
+### (g) The MetroPT-3 loader (`src/datasets/metropt.py`) — the first censored dataset
+Porto Metro APU telemetry (UCI 791; Veloso et al. 2022): one flat 1.5 M-row CSV of 15
+signals, **no label column at all**, plus four documented air-leak events supplied
+out-of-band. Every judgment call below is a `# DECISION (uncited):` in the module.
+
+- **Cycles**: fixed `metropt_cycle_minutes` wall-clock bins, floored against the Unix
+  epoch, so bin edges depend only on the knob and never on where the file starts. The
+  irregular ~10 s stream is **never reindexed onto a fixed frequency**. Channels are
+  `{analog}_mean`/`{analog}_std` (7 analog) then `{digital}_duty` (8 digital) = 22 — for
+  a binary channel the mean IS the fraction of the bin it was active.
+- **The invisible-gap defence**: ~17.6 % of wall-clock time is simply absent from the
+  file with no NaN row and no sentinel, so a bin holding fewer than
+  `metropt_min_samples_per_cycle` raw rows is **dropped, never aggregated** — a sparse
+  bin's mean/std is a different quantity from a full bin's.
+- **Units = intervention runs** (RESEARCH_PLAN §4, "the clock resets at each
+  intervention"): run *k* is the period ending at the START of event *k*, so the four
+  events cut the record into five runs and `unit_number` names the event it ends at.
+  Rows falling INSIDE a failure window belong to no run and are dropped — the APU is
+  already failing, and the window is the intervention itself. Bins are grouped by
+  `(run, bin start)` so a bin straddling a boundary splits and each part faces the
+  min-samples rule on its own.
+- **Censoring**: `event_observed = 1` for a run ending at a documented event, `0` for the
+  right-censored tail run. **A censored run can never be a test run** — its remaining
+  life is unknown, so "RUL at truncation" does not exist; the error names the censored
+  runs, lists the observed ones to pick instead, and says censored runs belong in TRAIN
+  where they contribute genuine alarm-negative rows.
+- **`time_cycles` counts SURVIVING bins**, renumbered 1..n per run (the canonical frame
+  requires consecutive 1-based cycles). A wall-clock gap therefore COLLAPSES rather than
+  leaving a hole, so **every MetroPT horizon/lead-time number is in aggregated cycles,
+  not hours** (~82 % time coverage ⇒ a 100-cycle RUL is ~122 wall-clock hours at the
+  60-minute default). Stated in the docstring so no reader converts them wrongly.
+- **`fault_type`/`fault_severity` carry the event table's own strings verbatim** (and
+  `'none'` for a censored run). No ordinal severity ladder is invented: all four real
+  events are one type, and fabricating a ladder would manufacture exactly the signal the
+  RQ-F probe exists to measure.
+- **Fail-loud schema checks**, each naming expected AND observed: the byte-exact 17-name
+  header (which catches a "helpful" `DV_eletric` → `DV_electric` correction and any
+  reordering), an explicit `strftime` parse (never inferred, so a D/M-swapped fork cannot
+  parse "silently right"), non-numeric signal columns, NaN cells (absent time is absent
+  ROWS in this file, so a NaN cell means something else broke), and any digital value
+  outside {0.0, 1.0}. The meaningless `Unnamed: 0` counter is never read (`usecols`),
+  while the header check still proves it was present and first. Two copies of the data
+  file raise rather than silently preferring one.
+- **Parsed-frame cache** `metropt_agg_v1_c<minutes>m_n<min_samples>_e<8-hex event
+  digest>.npz`, storing the untruncated aggregate so the split re-applies without
+  re-parsing. The **event-table digest is in the filename** because the table is a code
+  constant that cannot ride the `Config` cache key yet fully reshapes the aggregate.
+- **Non-comparability**: published MetroPT numbers use the raw stream under each author's
+  own labelling of the failure reports (e.g. Davari et al.'s 21 windows vs. the UCI
+  table's 4). These hour-binned, intervention-run, censoring-aware numbers must never
+  share a table with them.
+
+## 55. Milestone 6 — UCI Hydraulic + the RQ-F adjustment-vs-replacement probe
+The chapter RESEARCH_PLAN RQ-F exists for: *can a frozen TSFM embedding separate a fault
+that needs an **adjustment** from one that needs a **replacement**, with few labels, and
+does it beat hand-crafted indicators?* UCI 447 is the anchor because it is the only
+dataset in the study that ships a **native graded severity annotation per cycle**.
+
+### (a) The loader (`src/datasets/hydraulic.py`)
+- **Cycles/channels**: one row of every sensor file IS one 60 s cycle, so the 17 sensors'
+  intra-cycle samples are reduced to `hydraulic_agg_stats` statistics (34 channels at the
+  `mean_std` default). This is the same cycle-aggregation device N-CMAPSS uses (§27) and
+  it is what makes the three sampling rates (100/10/1 Hz) commensurable **without
+  resampling anything**. `slope` is the least-squares slope against the intra-cycle time
+  axis in SECONDS, so one slope means the same physical quantity at every rate.
+- **Units = contiguous label BLOCKS** (maximal runs of the same severity 4-tuple), cut on
+  the RAW cycle order BEFORE unstable rows are dropped, so a dropped settling cycle
+  shortens a unit instead of splitting one physical run in two. This is the only
+  leakage-safe segmentation available: the data is **not shuffled** — cooler condition
+  has just THREE contiguous runs in the whole record, so any chronological split makes it
+  perfectly separable.
+- **Severity polarity, the fix that matters**: `severity_<component>` is the ordinal index
+  into `HYDRAULIC_SEVERITY_ORDER`, so **0 = healthy and higher = worse for every
+  component** — cooler/valve/accumulator ladders run DOWN in raw units while pump leakage
+  runs UP. Assuming one global polarity would have inverted half the RQ-F labels.
+- **The action taxonomy**: `action_<component>` ∈ {0 none, 1 adjust, 2 replace}, where
+  `replace` is the component's WORST severity level and `adjust` is anything in between
+  (`HYDRAULIC_ACTIONS`). This is the only mapping the dataset's own ladder supports
+  without inventing thresholds, and it makes components with different ladder lengths
+  comparable.
+- **`setting_1/2/3 = 0.0`**: the rig has one operating point, and the severities are
+  LABELS — putting them in a setting column would leak the RQ-F target into the features.
+- **Stratified split**: a `hydraulic_test_fraction` of blocks, **stratified by cooler
+  severity** (the coarsest, most leak-prone factor) and selected by deterministic
+  systematic sampling at span midpoints — no RNG, spread across the valve/pump/accumulator
+  factorial that cycles inside each cooler regime. Every stratum keeps ≥ 1 train block and
+  yields ≥ 1 test block; a regime with a single eligible block stays wholly in TRAIN so no
+  regime appears only in test. Only blocks with ≥ `window_size + 1` cycles are ELIGIBLE
+  for test (they must survive truncation); shorter blocks are **not dropped**, they stay
+  in train — which is what keeps the real dataset usable at sane window sizes.
+- **Geometry validated up to one shared scale factor**: `documented_width == observed · k`
+  for a single k common to all 17 files. A real download gives k = 1 (and must then hold
+  exactly `HYDRAULIC_N_CYCLES = 2205` cycles); a uniformly down-scaled fixture gives
+  k > 1 while still proving every rate ratio is intact; a per-file mismatch cannot produce
+  a common k and raises. A non-finite reading is an error, never imputed.
+- Sensor files are read and reduced **one at a time as float32** (556 MB of text, ~740 MB
+  as float64), with the geometry checked before anything is concatenated. Parsed-frame
+  cache `hydraulic_agg_v1_<stats>.npz` stores the UNFILTERED, UNSPLIT aggregate so
+  `hydraulic_drop_unstable` / `hydraulic_test_fraction` re-apply without re-parsing.
+- **The RUL arm is not the point and the module says so loudly.** This is a cyclic
+  controlled-fault-injection rig, not a run-to-failure fleet: there is no degradation
+  trend within a block. RUL is emitted so the pipeline runs uniformly; the deliverable is
+  the RQ-F probe.
+
+### (b) The probe (`src/taxonomy.py`)
+`run_taxonomy_probe(config, label_column, ...)` — few-shot classification on FROZEN
+embeddings, so it costs no new backbone work:
+1. Re-window the secondary label out of `data.load_prepared` with the SAME functions the
+   Stage-A cache was built from, so label *i* is window *i*. The alignment is **asserted
+   against the cached unit ids**, never assumed — a cache built under a different
+   windowing protocol raises instead of scoring mismatched rows.
+2. For each `shots` value k, draw k labelled examples **per class** (seeded); a class with
+   fewer contributes all it has, and the row records `n_labelled` — what the probe
+   ACTUALLY trained on, not what was requested, so a scarce terminal fault is visible.
+   Sampling by ROW is correct here: the question is how many labelled EVENTS an
+   organization must annotate, and the split is already unit-disjoint.
+3. Fit a light linear probe (impute → standardize → multinomial logistic regression) and
+   score accuracy / macro-F1 / AUROC on the unit-disjoint test rows. **The standardizer is
+   fit on the few labelled rows only** — peeking at the unlabelled pool would violate the
+   premise of a few-shot deployment. NaNs are imputed because the catch22 bank legitimately
+   emits them for degenerate channels (LightGBM eats them natively; a linear probe cannot),
+   which would otherwise crash the indicator foil and silently drop it from the comparison.
+4. Repeat per FEATURE SOURCE — `embedding` vs `catch22` vs `window_stats`. **The gap
+   between the embedding line and the indicator line is the RQ-F answer.**
+
+Degenerate cells report `nan` rather than raising: a single-class draw predicts that class
+constantly, and an AUROC the probe cannot compute (a class absent from its few labels) is
+`nan`. `plots.plot_taxonomy` renders the few-shot curve per label; `_probe` joins
+`scoring.TSFM_SUFFIXES` so the rows score under the same win-rule as every other arm.
+
+## 56. Milestone 7 — Backblaze Drive Stats: the censored fleet at real scale
+The dataset RESEARCH_PLAN §3 calls "the ideal real-world C-MAPSS alternative": daily SMART
+snapshots across a large multi-model drive fleet, mostly-healthy, right-censored, and big
+enough to ask *"how many **failure events** must you observe before deploying?"* at a scale
+no simulation provides. It consumes the §54 censoring machinery unchanged.
+
+- **Every column is selected BY NAME.** The schema drifts across quarters (85 columns in
+  2013/2014, 197 from Q3 2023 = 11 metadata + 186 SMART) and new SMART columns are
+  **inserted in ascending attribute order, not appended** — positional indexing would
+  silently read a different attribute per quarter. The metadata prefix is 5, 8 or 11
+  columns wide (`vault_id`/`pod_id`/`is_legacy_format` arrived Q2 2023;
+  `datacenter`/`cluster_id`/`pod_slot_num` Q3 2023); an unrecognized width raises. Day
+  files are found by a recursive `**/????-??-??.csv` glob because the archives nest
+  inconsistently and carry `__MACOSX/` + `.DS_Store` junk.
+- **`failure` is a terminal marker, not a state** — it flags the LAST day a drive was
+  operational, at most once per drive, always its final row. A drive that simply STOPS
+  APPEARING with its last row `failure == 0` is **right-censored** (retired, migrated, or
+  the record ended), NOT a failure. Conflating the two is the classic Drive Stats analysis
+  bug; telling them apart is this milestone's entire point.
+- **Units/cycles**: one "cycle" = one drive-day; one "unit" = one drive keyed by
+  `(serial_number, model)` — serials are not globally unique forever, so the pair is the
+  key, sorted and enumerated for a stable `unit_number`.
+- **Scope control first** (RESEARCH_PLAN §11): SMART availability is *model-conditional*
+  (a model populates ~17–22 of 93 attributes; `smart_187`/`188` are absent on several),
+  so the fleet is restricted to `backblaze_models` before anything else — within one model
+  the channel set is comparable across drives. `setting_1` is the model index so
+  `condition_norm=True` normalizes per model, which matters because raw SMART counters are
+  on wildly different scales across vendors.
+- **Cleaning**: a row with `capacity_bytes < 0` (the `-1` sentinel) is dropped **whole** —
+  Backblaze's own guidance is that such a row is unreliable, not just its capacity. Empty
+  SMART cells → NaN → `0.0` (documented). `backblaze_min_days` drops drives with too
+  little history to window.
+- **Survivor subsampling that cannot lose a failure**:
+  `backblaze_max_survivors_per_model` subsamples the CENSORED drives per model, seeded
+  from `config.seed`, and **every FAILED drive is always kept**. At ~4.2e-5 failures per
+  drive-day (~1 in 23,500) an unsubsampled fleet is almost entirely survivors, so Stage A
+  would be dominated by drives that never fail.
+- **Stratified split, guarded**: the test set holds out `backblaze_test_fraction` of
+  DRIVES **stratified by (model, event_observed)**, so it can never come out
+  all-survivors — a plain random split of a 1-in-23,500 fleet trivially contains zero
+  failures and is then unscoreable. **A test set with no observed failure raises.**
+- **Gaps (`# DECISION (uncited):`)**: collection misses days. A gap of at most
+  `BACKBLAZE_MAX_GAP_DAYS` COLLAPSES (`time_cycles` counts observed days, so RUL is in
+  observed drive-days — the same convention MetroPT uses for its dropped bins). A LONGER
+  gap means the drive left the fleet and came back, so **only the final contiguous segment
+  is kept**: the earlier segment is a different life and is not silently glued on.
+- **RUL is a lower bound for censored drives and the module says so**: `rul_truth` is the
+  number of observed days cut off by truncation, which is the true remaining life only for
+  a FAILED test drive. That is exactly what `data.add_train_rul` documents and what
+  `data.add_alarm_label` consumes — the unknowable rows are dropped there, never guessed.
+  Run this dataset with `alarm_horizon` set: its RUL numbers are plumbing, the
+  alarm/lead-time metric is the result.
+- **`max_rul` is in observed DRIVE-DAYS**, not turbofan cycles — a per-experiment choice,
+  flagged like XJTU's minutes (§22).
+- Parsed-frame cache keyed by a scope digest (models × SMART set × date bounds × the
+  filtering knobs) so the multi-GB parse happens once per scope; `pyarrow` is added to
+  `requirements.txt` for it.
+- **Non-comparability**: published Drive Stats numbers use wildly varying protocols —
+  different model scopes, SMART subsets, horizons, usually-undocumented censoring
+  treatment, and frequently a random drive-DAY split that leaks a drive across train and
+  test. Nothing here is comparable to any of them.
+
+## 57. Phase-B close-out: the review fixes, the coverage gate, and the run notebook
+Milestones 3–7 were each adversarially reviewed after implementation. **Eight confirmed
+defects were found and fixed**; every one is a case where the code would have worked on
+the synthetic fixture and misbehaved on the real download, which is exactly what the
+review pass exists to catch. Recorded here because each fix changes behaviour.
+
+### (a) MetroPT-3 (§54g)
+1. **Censoring was inferred from the run INDEX, not from the record** (high). `observed =
+   run_id <= len(events)` silently converts a right-censored run into an observed failure
+   with a **fabricated `rul_truth`** on any truncated mirror — and the moment a 5th event
+   is appended to the table, which the module's own schema errors instruct. Fixed to gate
+   observedness on the record actually REACHING the event (`starts[run-1] <= ts.max()`),
+   which makes the existing censored-test-run guard fire correctly, and to **announce**
+   every event beyond the end of the record rather than reclassify silently.
+2. **The aggregate cache could not tell two CSVs apart** (medium). MetroPT has one dataset
+   name, so the filename was fully determined by the knobs — two data roots, a
+   re-download, or a swap between the three accepted file names all collided on one cache
+   and the second load served the first file's readings. A `(name, size, mtime)` source
+   digest now joins the filename, and the write is atomic (`os.replace`).
+3. **The invisible-gap defence was not scale-invariant** (medium). It was an ABSOLUTE row
+   count while `metropt_cycle_minutes` is this dataset's RQ-G sweep lever, making the
+   data-quality filter ~140× stricter at 10-minute bins than at 1440-minute ones — so the
+   aggregation-granularity comparison would have measured a coverage gradient. New
+   `metropt_min_bin_coverage` (default 0.5) expresses it as a FRACTION of a bin at the
+   documented `METROPT_NOMINAL_CADENCE_S`; the absolute floor remains as a guard, the
+   effective threshold is the max of the two, and the loader now REPORTS how many bins it
+   dropped (a silent filter that never fires reads exactly like one that works).
+
+### (b) UCI Hydraulic (§55)
+4. **The stratified split aliased against the nested factorial** (high). Valve has period 4
+   in block index, so at `hydraulic_test_fraction = 0.25` — the most natural sweep value of
+   a keyed field meant to be swept — every span midpoint landed on the same residue and the
+   test set collapsed onto ONE valve level, silently making the RQ-F chapter unanswerable.
+   Fixed by stratifying on the CROSS `(cooler, taxonomy component)`, adding a **fail-loud
+   coverage guard** (both sides must see ≥ 2 levels of the target), and, when the cross is
+   too sparse, falling back to the TARGET component alone — never to cooler alone, which is
+   precisely the stratification that aliases. Skipped strata are now reported.
+5. **`rul_truth` was a zero-variance target** (high). Uniform blocks truncated at a fixed
+   fraction give every test unit the same remaining count, so the predict-the-mean floor
+   scores a perfect 0.0 RMSE that no model can beat — and the campaign was routing those
+   numbers into the same `results_v2.csv` and the same figures as C-MAPSS. The deeper
+   reading is that **this rig has no failure events at all**: a block ends because the
+   experimenter changed the set-point. So the loader now emits `event_observed = 0`
+   everywhere (literally true), warns loudly when `rul_truth` is constant, and the new
+   `config.CLASSIFICATION_DATASET_KINDS` / `is_classification_dataset()` routes the dataset
+   to the **RQ-F taxonomy probe** as its campaign deliverable, skipping every
+   time-to-event stage (`campaign.TIME_TO_EVENT_STAGES`).
+6. **The cache was keyed by nothing identifying the data, and its staleness guard was
+   self-referential** (medium): it compared the cached aggregate against the cached
+   profile, so it could never fire, and pointing the loader at another hydraulic directory
+   silently returned the previous dataset — bypassing the 2205-cycle truncated-download
+   assertion. A `(name, size)` fingerprint of the 18 files now joins the filename.
+   Also: the cold path returned float64 while the warm path returned a float32 round-trip,
+   so a resume after Stage A trained on values differing from the cached embeddings' — both
+   paths now return the stored precision.
+
+### (c) Backblaze (§56)
+7. **Gap segmentation ran on the days that survived cleaning** (high), so ≥ 3 consecutive
+   `capacity_bytes = -1` rows — a hole the LOADER punches — were indistinguishable from the
+   drive leaving the fleet and silently discarded its entire pre-hole history. `_read_day`
+   now also returns the scoped rows it dropped, and segmentation runs on **presence**.
+   Relatedly, the failure-semantics check ran over a drive's whole history *before*
+   segmentation, hard-aborting the serial-reuse case the gap rule exists to support; it now
+   validates the segment that is actually kept.
+8. **The cache hashed only the scope knobs, never the corpus** (high): a grown directory
+   (another quarter unzipped) silently served a stale aggregate. The in-scope day
+   inventory — by file NAME, so the cache stays location-independent — now joins the digest.
+   Plus: the cache write is atomic and a corrupt cache raises a message naming the file and
+   the remedy instead of a bare `BadZipFile`; and duplicate / metadata-colliding entries in
+   `backblaze_smart_columns` fail loud instead of dying inside the reader with a pandas
+   "Length mismatch" (not silently de-duplicated — the emitted channel ORDER is the config's
+   contract).
+
+### (d) The gate
+`pytest -q --cov=src --cov-branch` → **100% line + branch coverage of `src/`, 496 tests**,
+CPU-only and download-free. `.coveragerc` is unchanged (`fail_under = 100`); the only
+`# pragma: no cover` additions are lazy heavy-import lines (`pyarrow.csv`), the §32
+boundary. Every recorded cache key is byte-identical — `windows_FD001_1da313c871251cec`,
+`windows_FD002_3a594bbc827991fe`, `windows_XJTU-SY_97e96700cc2670b4`,
+`windows_DS02_ba4dfa4567c86cba`, `windows_DSALL_ec6a375602a4b1c2` — because every new
+field is family-scoped and/or conditional on being non-default (asserted in
+`tests/test_cache_keys.py` and `tests/test_feature_modes.py`).
+
+New test modules: `test_feature_modes.py` (M3/M4), `test_censoring.py` (the alarm arm end
+to end), `test_taxonomy.py` (RQ-F), `test_metropt.py`, `test_hydraulic.py`,
+`test_backblaze.py`, and `test_phase_b_integration.py` — the acceptance test that runs
+every Phase-B chapter through the real registry, loading path, Stage-A cache and scoring
+with only the GPU backbone mocked.
+
+### (e) The run notebook
+`notebooks/phase_b.ipynb` (notebook-only wiring, no `src/` change): one runtime for the
+three real datasets, with the per-dataset protocol printed before anything runs, the alarm
+chapter scored by the direction-aware win-rule, the RQ-F curve rendered, and the RQ-D /
+RQ-G factor probes behind a `RUN_PROBES` flag. `requirements.txt` gains `pyarrow`;
+scikit-survival / lifelines are deliberately NOT added — the censored arm as built uses a
+fixed-horizon binary target (IMPLEMENTATION_PLAN §6.3's own design), so no survival library
+is imported anywhere and an unused heavy dependency is worse than a missing one.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
 completed runs.
 
 *(N-CMAPSS moved OUT of this list — implemented in §27; see DATASET_EXPANSION_PLAN.md.
-TimesFM/MOMENT/TTM/Moirai moved OUT — implemented in §34.)*
+TimesFM/MOMENT/TTM/Moirai moved OUT — implemented in §34. MetroPT-3, UCI Hydraulic and
+Backblaze moved OUT — implemented in §54–§56, closing Milestones 5–7.)*
+
+Still deliberately out of scope after Phase B: a joint multi-task model (RUL +
+failure-type + lead-time predicted together) — RESEARCH_PLAN §4 keeps that for a later
+phase and the RQ-F probe stays few-shot on frozen embeddings (IMPLEMENTATION_PLAN §10);
+perturbation of REAL sensor readings (`noise_injection` remains sim-only, guarded loud);
+and raw sub-cycle/waveform deep modelling beyond the RQ-D downsampled-raw XJTU channels
+and the RQ-G aggregation sweep — the pipeline stays cycle/window-level.
 

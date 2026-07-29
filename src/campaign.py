@@ -39,6 +39,21 @@ from .models import EMBEDDERS
 
 CAMPAIGN_STAGES = ("cache", "sweep", "fairness", "horizon", "figures")
 
+# Stages that only make sense for a RUL (run-to-failure) dataset. On a CENSORED fleet
+# (MetroPT, Backblaze) the sweep becomes the binary alarm sweep and these two are
+# SKIPPED with a notice rather than producing meaningless numbers (CHANGES.md §54):
+#   * ``fairness`` -- ``cycle_reg``/``gbm_age`` regress RUL on elapsed cycles, and a
+#     right-censored survivor has no RUL to regress;
+#   * ``horizon``  -- its bins are RUL bands, which the alarm arm does not predict.
+RUL_ONLY_STAGES = ("fairness", "horizon")
+
+# Stages that need a time-to-event target at all. A CLASSIFICATION dataset (UCI
+# Hydraulic, §55) has no failure events, so every one of these is skipped for it and the
+# ``sweep`` stage runs the RQ-F taxonomy probe instead -- the dataset's real deliverable.
+# Emitting a RUL curve for it would table a constant-target number (its blocks are all
+# the same length, so the predict-the-mean floor scores a perfect 0.0) beside C-MAPSS's.
+TIME_TO_EVENT_STAGES = ("sweep", "fairness", "horizon")
+
 # Per-dataset protocol defaults recorded ONCE here (CHANGES.md §30) instead of every
 # notebook re-deciding them. A user-supplied ``dataset_overrides`` is merged OVER these
 # per dataset, per key (the user always wins). Pass ``dataset_overrides={}`` to opt out.
@@ -53,6 +68,31 @@ DEFAULT_DATASET_OVERRIDES = {
     # download surfaces loudly rather than silently unioning a different fleet.
     "DSALL": {"dsall_datasets": ["DS01", "DS02", "DS03", "DS04", "DS05", "DS06",
                                  "DS07", "DS08a", "DS08c"]},
+    # ---- Phase-B real datasets (CHANGES.md §54-§56) ----
+    # MetroPT-3: one "cycle" = one hour (metropt_cycle_minutes=60), so window_size=30 is
+    # 30 h of history and tsfm_context_length=256 is ~11 days -- the §12 winner shape in
+    # this dataset's units. DECISION (uncited): alarm_horizon=24 asks "will this APU need
+    # an intervention within a DAY?", a lead time a metro depot can actually schedule
+    # against (the dataset's own stated requirement, ">= 2 h before non-operational", is
+    # met with a wide margin); max_rul=168 (one week) keeps the RUL spine meaningful for
+    # the runs that DO end in an observed event while satisfying alarm_horizon < max_rul.
+    "MetroPT-3": {"max_rul": 168, "window_size": 30, "tsfm_context_length": 256,
+                  "alarm_horizon": 24},
+    # UCI Hydraulic: one "cycle" = one 60 s rig cycle and a "unit" = a contiguous
+    # constant-fault BLOCK, most of which are only ~10-11 cycles long (the valve factor
+    # is varied innermost). window_size MUST therefore be small or most blocks yield no
+    # windows at all -- and a TEST block additionally needs window_size+1 cycles to
+    # survive truncation. DECISION (uncited): window_size=6 leaves a 10-cycle block 5
+    # training windows and still supports the truncated test protocol with margin;
+    # max_rul=60 is inactive at this block length (its RUL arm is not the point -- this
+    # is the RQ-F anchor, see src/datasets/hydraulic.py).
+    "Hydraulic": {"max_rul": 60, "window_size": 6, "tsfm_context_length": 6},
+    # Backblaze: one "cycle" = one drive-day. DECISION (uncited): alarm_horizon=30 is
+    # the standard "will this drive fail within 30 days?" framing in the SMART-prediction
+    # literature; max_rul=180 keeps the horizon well inside the clip point. window_size=30
+    # (a month of history) with the §12 winner's 256-day context.
+    "Backblaze": {"max_rul": 180, "window_size": 30, "tsfm_context_length": 256,
+                  "alarm_horizon": 30},
 }
 
 
@@ -88,28 +128,63 @@ def _run_stages(cfg: Config, stages, device: str,
                 embedder_factory: Optional[Callable[[Config], object]],
                 baseline_names: Optional[list[str]]) -> dict:
     from .embeddings import build_embedding_cache
-    from .sweep import run_sweep, run_fairness_baselines
+    from .sweep import run_sweep, run_alarm_sweep, run_fairness_baselines
     from .horizon import build_horizon_cache, run_horizon_eval
 
     emb = embedder_factory(cfg) if embedder_factory is not None else None
+    censored = cfg.is_censored_dataset()
+    classification = cfg.is_classification_dataset()
     artifacts: dict = {}
     if "cache" in stages:
         artifacts["cache"] = str(build_embedding_cache(cfg, embedder=emb))
     if "sweep" in stages:
-        artifacts["results_csv"] = str(run_sweep(cfg, device=device,
-                                                 baseline_names=baseline_names))
-    if "fairness" in stages:
+        if classification:
+            # No failure events at all -> the RQ-F taxonomy probe IS the deliverable.
+            from .taxonomy import run_taxonomy_probe
+            from .datasets.hydraulic import action_column
+            artifacts["taxonomy_csv"] = str(run_taxonomy_probe(
+                cfg, action_column(cfg.hydraulic_taxonomy_component),
+                device=device, embedder_factory=embedder_factory))
+        elif censored:
+            # A mostly-healthy fleet is scored on the alarm question, into its OWN CSV
+            # (the metric columns are disjoint from the RUL ones -- §54). ``baseline_names``
+            # is a RUL roster, so the alarm sweep's own default roster is used instead.
+            artifacts["alarm_csv"] = str(run_alarm_sweep(cfg, device=device))
+        else:
+            artifacts["results_csv"] = str(run_sweep(cfg, device=device,
+                                                     baseline_names=baseline_names))
+    if classification:
+        skipped = [s for s in TIME_TO_EVENT_STAGES if s in stages and s != "sweep"]
+        if skipped:
+            print(f"[campaign] {cfg.dataset}: skipping time-to-event stage(s) {skipped} "
+                  f"-- this dataset has NO failure events (its units end because the "
+                  f"experiment moved on), so RUL is degenerate; the RQ-F taxonomy probe "
+                  f"is its deliverable (§55).")
+    elif censored:
+        skipped = [s for s in RUL_ONLY_STAGES if s in stages]
+        if skipped:
+            print(f"[campaign] {cfg.dataset}: skipping RUL-only stage(s) {skipped} -- "
+                  f"this is a CENSORED fleet, scored on the alarm/lead-time metric (§54).")
+    time_to_event = not (censored or classification)
+    if "fairness" in stages and time_to_event:
         artifacts["fairness_csv"] = str(run_fairness_baselines(cfg))
-    if "horizon" in stages:
+    if "horizon" in stages and time_to_event:
         build_horizon_cache(cfg, embedder=emb)
         # n_units_list=None => all units of THIS dataset (XJTU has 9, FD001 100)
         artifacts["horizon_csv"] = str(run_horizon_eval(cfg, device=device))
     if "figures" in stages:
-        from .plots import plot_data_scaling, plot_horizon
+        from .plots import (plot_alarm_scaling, plot_data_scaling, plot_horizon,
+                            plot_taxonomy)
         figs = []
         if "results_csv" in artifacts:
             figs += plot_data_scaling(artifacts["results_csv"], cfg.figures_dir(),
                                       prefix=cfg.result_prefix(), show=False)
+        if "alarm_csv" in artifacts:
+            figs += plot_alarm_scaling(artifacts["alarm_csv"], cfg.figures_dir(),
+                                       prefix=cfg.result_prefix(), show=False)
+        if "taxonomy_csv" in artifacts:
+            figs += plot_taxonomy(artifacts["taxonomy_csv"], cfg.figures_dir(),
+                                  prefix=cfg.result_prefix(), show=False)
         if "horizon_csv" in artifacts:
             figs += plot_horizon(artifacts["horizon_csv"], cfg.figures_dir(),
                                  prefix=cfg.result_prefix(), show=False)
