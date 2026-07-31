@@ -17,7 +17,8 @@ Data/            One root housing every raw dataset (config.data_root); only the
   Hydraulic/       N-CMAPSS/    the .h5 files, flat
   Backblaze/       MetroPT-3/   MetroPT3(AirCompressor).csv (MetroPT3.csv also accepted)
                    Hydraulic/   the 17 sensor .txt files + profile.txt
-                   Backblaze/   the daily YYYY-MM-DD.csv files (any nesting)
+                   Backblaze/   the daily YYYY-MM-DD.csv files (any nesting; fetched by
+                                notebooks/backblaze_download.ipynb)
 src/
   config.py      Single Config dataclass: seeds, max_rul, window, tsfm_context_length,
                  head_features, pooling, unit-count grid, paths (data_root +
@@ -86,32 +87,35 @@ src/
                  cross-TSFM figures. All result files are prefixed with
                  config.experiment_name (config.results_path / figures_dir helpers).
 tests/           CPU-only smoke tests (no GPU, no C-MAPSS download).
-notebooks/       One notebook per dataset family, each self-cloning the repo from GitHub
-  cmapss.ipynb   and pointing at Drive for data/cache/results only — so they run in
-  xjtu.ipynb     PARALLEL on separate Colab runtimes. Each: Setup (clone + mount) →
-  ncmapss.ipynb  Config → Campaign (run_campaign restricted to that family). cmapss.ipynb
-  phase_b.ipynb  also carries the gated FD001 deep-dives (ablation → winner, sweep,
-                 raised-cap, transfer, plots). phase_b.ipynb runs the three REAL
-                 industrial datasets (MetroPT-3 · Hydraulic · Backblaze) and scores the
-                 two chapters they produce instead of a RUL curve: the censored
-                 alarm/lead-time metric and the RQ-F few-shot taxonomy probe (§54–§56).
-  verify/        One notebook per backbone: install its isolated requirements/<model>.txt
-                 and run the weight-level GPU spike (scripts/verify_backbones_colab.py).
-  campaign/      The cross-TSFM C-MAPSS campaign (CHANGES.md §45): Stage A per model
-                 (chronos/moment/timesfm/ttm/moirai.ipynb — one GPU runtime each, embed →
-                 cache to Drive) → Stage B (score.ipynb — one core runtime, read the five
-                 caches, train heads + baselines incl. catch22_gbm, emit the success map,
-                 cross-model data-scaling, and earliness/cost figures).
-    milestone2/  The remaining C-MAPSS chapters (CHANGES.md §47, §51) — three parallel GPU
-                 sessions plus one core-runtime scoring pass:
-                 timesfm_probes.ipynb (RQ-A/C/E/H factor probes WITH the shared baselines
-                 + RQ-M), chronos_probes_zeroshot.ipynb (the same probes models-only +
-                 RQ-M + RQ-Z zero-shot), fairness_moment_ttm_moirai.ipynb (RQ-M for
-                 MOMENT/TTM/Moirai-2, one model per runtime cycle), and score.ipynb —
-                 the deferred scoring pass: it globs the per-session CSVs
-                 (probe_<factor>_{chronos,timesfm}.csv, representation_fairness_*.csv,
-                 zeroshot.csv), applies the win-rule, and writes the probe success map,
-                 the RQ-M fairness summary and the RQ-Z table + their figures to Drive.
+notebooks/       All Colab notebooks. Each clones the repo from GitHub into the runtime's
+  cmapss.ipynb   ephemeral disk and uses Drive only for Data/ + cache/ + results/.
+  backblaze_download.ipynb   cmapss.ipynb is the original C-MAPSS family notebook, kept
+  verify/        for the gated FD001 deep-dives (ablation → winner, raised-cap, transfer).
+  archive/       backblaze_download.ipynb streams the 2024 Backblaze Drive Stats zips and
+  campaign/      extracts the daily CSVs straight onto Drive (§58). verify/ holds the
+    milestone_1/ per-backbone weight-level GPU spikes (scripts/verify_backbones_colab.py).
+    milestone_2/ archive/ holds the RETIRED family notebooks (xjtu, ncmapss, phase_b —
+    milestone_3/ superseded by campaign/milestone_3/, CHANGES.md §58).
+                 campaign/ is the run surface, one folder per milestone:
+                 milestone_1/  the cross-TSFM C-MAPSS campaign (§45): Stage A per model
+                               (chronos/moment/timesfm/ttm/moirai.ipynb — one GPU runtime
+                               each, embed FD001–FD004 → cache to Drive) → Stage B
+                               (score.ipynb — one core runtime: heads + baselines incl.
+                               catch22_gbm, the success map, cross-model data-scaling,
+                               and the earliness/cost figures).
+                 milestone_2/  the remaining C-MAPSS chapters (§47, §51): three GPU
+                               sessions (timesfm_probes.ipynb — RQ-A/C/E/H probes WITH
+                               the shared baselines + RQ-M; chronos_probes_zeroshot.ipynb
+                               — the probes models-only + RQ-M + RQ-Z;
+                               fairness_moment_ttm_moirai.ipynb — RQ-M for the other
+                               three) + score.ipynb (core runtime: probe success map,
+                               RQ-M fairness summary, RQ-Z table + figures).
+                 milestone_3/  the dataset scale-up (§58): FIVE per-model notebooks
+                               (chronos/moment/timesfm/ttm/moirai.ipynb), each running
+                               its ONE backbone over every non-C-MAPSS dataset —
+                               XJTU-SY · N-CMAPSS DS01–DS08c + DSALL · MetroPT-3 ·
+                               Hydraulic · Backblaze — writing per-dataset
+                               results/<dataset>/ folders.
 ```
 
 ## Run the tests (CPU, no download)
@@ -136,79 +140,72 @@ download-free, so the gate runs anywhere `pip install -r requirements.txt` succe
 
 ## Run on Colab
 
-There are **three notebooks, one per dataset family** — `notebooks/cmapss.ipynb`,
-`notebooks/xjtu.ipynb`, `notebooks/ncmapss.ipynb` — so each family runs on its own Colab
-runtime **in parallel** (CHANGES.md §33). On Drive you keep **only the notebooks and the
-data**; each notebook **clones the code from GitHub** into Colab's ephemeral disk, so you
-never mirror or re-upload the repo. Open one (or several at once) and hit **Run all**:
+Everything runs from Colab notebooks that **clone this repo from GitHub** into the
+runtime's ephemeral disk and use Drive only for what must persist: `Data/`, `cache/`,
+`results/` — one Drive root, default `MyDrive/pdm_tsfm`. Milestones 1–2 (all five
+backbones on C-MAPSS) are **complete**; their notebooks stay for reproduction. The
+active run surface is **`notebooks/campaign/milestone_3/`**.
 
-1. **Setup** — installs, mount Drive, `git clone` the public repo into `/content`, put that
-   clone on `sys.path`, print GPU. The clone is re-run-safe (fast-forwards if present); set
-   `REPO_BRANCH` to run a branch other than `main`.
-2. **Config** — set `DRIVE` to the Drive folder holding your `Data/` (raw datasets live under
-   one `data_root`: `Data/CMAPSSData`, `Data/XJTU-SY`, `Data/N-CMAPSS`); `cache/` and
-   `results/` are written there too. Defaults are the recorded FD001 ablation winner
-   (CHANGES.md §12).
-3. **Campaign** — `run_campaign(config, datasets=…)` restricted to that family: C-MAPSS
-   FD001–FD004 · XJTU-SY · N-CMAPSS DS01–DS08c + the combined DSALL fleet · MetroPT-3 ·
-   Hydraulic · Backblaze. Per combo it runs Stage A cache → data-scaling sweep → fairness
-   arms → horizon eval → saved figures, each stage restartable. Per-dataset protocol
-   choices come from `campaign.DEFAULT_DATASET_OVERRIDES` (CHANGES.md §30, §54–§56).
-   Datasets not downloaded into `Data/` are skipped with a notice; every artifact is named
-   `<dataset>_<model>_…` (e.g. `results/FD002_chronos-2_results_v2.csv`).
+### Milestone 3 — every non-C-MAPSS dataset (`notebooks/campaign/milestone_3/`, CHANGES.md §58)
 
-   **Censored fleets take a different route.** MetroPT-3 and Backblaze are mostly-healthy
-   fleets with right-censored survivors, so `config.is_censored_dataset()` sends them to
-   the binary **alarm** sweep (“will this unit need an intervention within
-   `alarm_horizon` cycles?”) writing **`alarm_results.csv`** — a *different file* from
-   `results_v2.csv`, because the alarm metrics (precision/recall/AUROC + lead time) share
-   no scale with the RUL ones and must never be tabled together. The RUL-only `fairness`
-   and `horizon` stages are skipped with a printed notice (CHANGES.md §54).
-4. **Deep-dives** (in `cmapss.ipynb` only; optional — set `RUN_DEEP_DIVES = True` in its
-   Config cell) — the single-dataset FD001 studies: the context/feature ablation, learning
-   curves, the CORN-vs-MSE paired-significance table, the raised-label-cap arm (max_rul=200),
-   and the FD001→FD003 cold-start transfer.
+**Five notebooks, one backbone per GPU runtime** — `chronos` / `moment` / `timesfm` /
+`ttm` / `moirai` `.ipynb` — because the five stacks are mutually incompatible
+(`requirements/README.md`). Each notebook runs `run_campaign` for its ONE frozen backbone
+over XJTU-SY · N-CMAPSS DS01–DS08c + the combined DSALL fleet · MetroPT-3 · UCI
+Hydraulic · Backblaze (C-MAPSS is done — milestones 1–2). Open one (or several, on
+separate runtimes) and **Run all**:
 
-### Phase B — the three real industrial datasets (`notebooks/phase_b.ipynb`, CHANGES.md §54–§56)
+- **Per-dataset results folders.** Each dataset's `run_campaign` call gets
+  `results_dir=results/<dataset>/`, so every artifact lands in its dataset's own folder
+  (figures under `results/<dataset>/figures/`). Filenames keep the `<dataset>_<model>_…`
+  prefix, so cross-model scoring globs `results/*/*_results_v2.csv`.
+- **Automatic routing** (CHANGES.md §54–§56). Run-to-failure datasets get the RUL
+  data-scaling sweep + horizon eval. The censored fleets (MetroPT-3, Backblaze) get the
+  binary **alarm** sweep instead — `*_alarm_results.csv`, a *different file* because
+  precision/recall/AUROC + lead time share no scale with RMSE/NASA and must never be
+  tabled together; the RUL-only `fairness`/`horizon` stages are skipped with a notice.
+  Hydraulic (a fault-injection rig with **no failure events at all**, so its RUL is
+  degenerate by construction) gets the **RQ-F taxonomy probe** → `*_taxonomy.csv`.
+  Per-dataset protocol comes from `campaign.DEFAULT_DATASET_OVERRIDES`; each unit/horizon
+  is in that dataset's own units (MetroPT: binned hours; Hydraulic: 60 s rig cycles;
+  Backblaze: drive-days).
+- **A preflight cell** prints FOUND/missing per dataset *before* anything runs — a
+  dataset absent from `Data/` is skipped with a notice, never an error.
+- **Restartable everywhere.** Re-running skips cached embeddings and completed sweep
+  cells, so the big datasets (N-CMAPSS, DSALL, Backblaze) can be finished across several
+  sessions; trim the notebook's `DATASETS` list to slice work deliberately.
+- **On-runtime baseline roster** (`DECISION`, §58): `predict_mean · gbm · cnn · lstm ·
+  catch22_gbm`. `minirocket` is dropped on backbone runtimes (its sktime/numba pins fight
+  the backbone stacks — the §48 precedent); censored fleets use the alarm sweep's own
+  roster automatically.
+- **Gated probes.** `RUN_PROBES = True` adds RQ-D (XJTU raw-vs-indicators) and RQ-G
+  (N-CMAPSS aggregation) for that backbone; baselines run once, in the chronos session
+  (the §47/§48 pattern), and every session writes its own `probe_<factor>_<tag>.csv`.
 
-`notebooks/phase_b.ipynb` runs MetroPT-3, UCI Hydraulic and Backblaze on one runtime.
-**They do not all produce a RUL curve, by design** — `run_campaign` routes each to the arm
-its physics supports:
+**Getting Backblaze onto Drive:** run `notebooks/backblaze_download.ipynb` first. It
+streams the 2024 quarterly zips onto the runtime's ephemeral disk and extracts **only the
+daily `YYYY-MM-DD.csv` files** into `Data/Backblaze/` (no zip touches Drive, no local
+round-trip). The full 2024 year is ≈ 40 GB on Drive; trim its `QUARTERS` list to take
+less. Restartable: complete quarters are skipped, partial ones are filled in.
 
-| dataset | what it is | arm the campaign runs | headline artifact |
-|---|---|---|---|
-| **MetroPT-3** (UCI 791) | real metro-train APU; 4 documented air-leak events + a right-censored tail | binary **alarm** sweep | `*_alarm_results.csv` + alarm-scaling figures |
-| **Backblaze** Drive Stats | real drive fleet; ~1 in 23,500 drive-days fails, most drives censored | binary **alarm** sweep | `*_alarm_results.csv` + alarm-scaling figures |
-| **UCI Hydraulic** (447) | real rig with **no failure events at all** (faults are injected and held) | **RQ-F taxonomy probe** | `*_taxonomy.csv` + the few-shot curve |
+**FD001 deep-dives** (optional, `notebooks/cmapss.ipynb`, `RUN_DEEP_DIVES = True`): the
+context/feature ablation, learning curves, CORN-vs-MSE paired significance, the
+raised-label-cap arm (max_rul=200), and the FD001→FD003 cold-start transfer.
 
-Two consequences worth knowing before reading any number:
-
-- **Alarm metrics are never tabled against RUL ones.** Precision/recall/AUROC + lead time
-  share no scale with RMSE/NASA, so they go to a *different CSV* and the win-rule scores
-  them in the reversed direction (they are skill scores, not errors). The RUL-only
-  `fairness` and `horizon` stages are skipped with a printed notice.
-- **Hydraulic's RUL is degenerate by construction** — its label blocks are uniformly sized,
-  so `rul_truth` comes out constant and the predict-the-mean floor scores a perfect 0.0.
-  The loader warns, and the campaign runs the RQ-F probe for it instead.
-
-Each unit means something different per dataset (MetroPT: an intervention run, in binned
-*hours*; Hydraulic: a constant-fault label block, in 60 s rig cycles; Backblaze: one drive,
-in observed *drive-days*), so read every horizon and lead time in that dataset's own units.
-
-### Cross-TSFM C-MAPSS campaign (`notebooks/campaign/`, CHANGES.md §45)
+### Milestone 1 — cross-TSFM C-MAPSS campaign (`notebooks/campaign/milestone_1/`, CHANGES.md §45) — complete
 
 The five backbones have mutually incompatible dependencies (CHANGES.md §42), so the
 cross-TSFM comparison splits along the embedding cache — a clean Drive hand-off — into
 per-model **Stage A** and a single **Stage B**:
 
-1. **Stage A — one GPU runtime per model.** Open `notebooks/campaign/<model>.ipynb`
+1. **Stage A — one GPU runtime per model.** Open `notebooks/campaign/milestone_1/<model>.ipynb`
    (`chronos`, `moment`, `timesfm`, `ttm`, `moirai`) on a fresh GPU runtime, install only
    that model's `requirements/<model>.txt`, and run it: it embeds FD001–FD004 with that one
    frozen TSFM and writes the `.npz` caches to Drive (`run_campaign(..., stages=["cache"])`
    plus the horizon caches). Restartable; run all five (in parallel on separate runtimes).
-2. **Stage B — one core runtime.** Open `notebooks/campaign/score.ipynb`, `pip install -r
-   requirements.txt` (core only, no backbones — the embeddings are cached), point `DRIVE` at
-   the same folder, and run it: `run_campaign(..., models=[all five],
+2. **Stage B — one core runtime.** Open `notebooks/campaign/milestone_1/score.ipynb`,
+   `pip install -r requirements.txt` (core only, no backbones — the embeddings are cached),
+   point `DRIVE` at the same folder, and run it: `run_campaign(..., models=[all five],
    stages=["sweep","fairness","horizon","figures"], baseline_names=[…,"catch22_gbm"])` reads
    the caches and trains heads + baselines, then it assembles the cross-TSFM **success map**,
    the combined cross-model **data-scaling** curves, and the **earliness / cost** figures.
@@ -217,7 +214,7 @@ Both stages build the **same canonical `Config`** for every cache-key field (the
 §12 winner shape: `tsfm_context_length=256`, `pooling="mean"`), so Stage B finds exactly the
 caches Stage A wrote.
 
-### Milestone-2 completion (`notebooks/campaign/milestone2/`, CHANGES.md §47/§51)
+### Milestone 2 — completion notebooks (`notebooks/campaign/milestone_2/`, CHANGES.md §47/§51) — complete
 
 The remaining C-MAPSS chapters — the factor probes (RQ-A history, RQ-C channels, RQ-E label
 cap, RQ-H sim-only noise), the RQ-M common-representation fairness ablation, and the RQ-Z
