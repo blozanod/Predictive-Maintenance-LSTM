@@ -442,20 +442,51 @@ def test_missing_archive_raises(tmp_path):
 # ---------------------------------------------------------------------------
 # Fail-loud: the failure-flag semantics
 # ---------------------------------------------------------------------------
-def test_two_failure_rows_for_one_drive_raise(tmp_path):
-    root = _tiny(tmp_path, n_days=6)
-    _edit(_day_files(root)[0], "S0F0", "failure", "1")     # it already fails on day 5
+def test_rows_after_a_failure_are_truncated_and_announced(tmp_path, capsys):
+    """Real releases keep reporting a handful of drives for a few days AFTER their
+    failure=1 row (e.g. ZHZ3N9S2 in the 2024 corpus, §60). The failure day still ends
+    the life being modelled: the kept segment is truncated at the failure row -- keeping
+    the OBSERVED failure -- and every such drive is announced, never trimmed silently."""
+    root = _tiny(tmp_path, n_days=6, n_survivors=4,        # V3 = a full-length survivor
+                 bad_capacity=None)                        # (no hole in V3's rows here)
+    _edit(_day_files(root)[3], "S0V3", "failure", "1")     # ..."fails" on day 4...
+    # ...but its rows for days 5-6 remain: the zombie-tail shape that aborted the run.
+    cfg = _cfg(root, tmp_path, backblaze_min_days=2)
+    payload = BB._load_or_build_aggregate(*BB._check_scope(cfg), cfg, verbose=False)
+    records = BB._drive_records(payload, sorted(set(cfg.backblaze_models)), cfg,
+                                verbose=True)
+    out = capsys.readouterr().out
+    assert "1 drive(s) kept reporting AFTER their failure=1 day" in out
+    assert "S0V3" in out and "+2 row(s)" in out
+    record = next(r for r in records if r["serial"] == "S0V3")
+    assert record["observed"] == 1          # the failure is kept -- only the tail goes
+    assert len(record["rows"]) == 4         # days 1-4; the 2 zombie rows are trimmed
+
+
+def test_second_failure_row_is_part_of_the_zombie_tail(tmp_path, capsys):
+    """A tail that itself carries another failure=1 row is the same lagging-report
+    artifact: the life ends at the FIRST failure=1 row, and everything after it --
+    including the later failure row -- goes with the trimmed tail instead of aborting
+    the parse. Here the first failure lands on day 1, so the 1-day life then falls
+    under backblaze_min_days and the drive is dropped as too short (still announced)."""
+    root = _tiny(tmp_path, n_days=12)                      # long enough to split after the drop
+    _edit(_day_files(root)[0], "S0F0", "failure", "1")     # it already fails on day 12
+    cfg = _cfg(root, tmp_path, backblaze_min_days=2)
+    BB.load_backblaze(cfg)                                 # end-to-end: must not raise
+    out = capsys.readouterr().out
+    assert "kept reporting AFTER their failure=1 day" in out and "+11 row(s)" in out
+    payload = BB._load_or_build_aggregate(*BB._check_scope(cfg), cfg, verbose=False)
+    records = BB._drive_records(payload, sorted(set(cfg.backblaze_models)), cfg,
+                                verbose=False)
+    assert not any(r["serial"] == "S0F0" for r in records)  # 1-day life -> too short
+
+
+def test_check_drive_contract_still_rejects_multiple_failure_rows():
+    """_drive_records' truncation guarantees at most one failure=1 row reaches
+    _check_drive, but the contract itself stays fail-loud for any other caller."""
+    days = np.arange(4, dtype=np.int64)
     with pytest.raises(ValueError, match="carries 2 failure=1 rows"):
-        BB.load_backblaze(_cfg(root, tmp_path / "cache", backblaze_min_days=2))
-
-
-def test_rows_after_a_failure_raise(tmp_path):
-    """failure=1 marks the LAST operational day; anything after it means the flag no
-    longer means what the docs say, so the loader refuses instead of trimming."""
-    root = _tiny(tmp_path, n_days=6)
-    _edit(_day_files(root)[0], "S0V0", "failure", "1")     # a survivor, on its first day
-    with pytest.raises(ValueError, match=r"row\(s\) AFTER its failure=1 row"):
-        BB.load_backblaze(_cfg(root, tmp_path / "cache", backblaze_min_days=2))
+        BB._check_drive("S1", "M", days, np.array([0, 1, 0, 1], np.int64))
 
 
 def test_a_drive_twice_on_one_day_raises(tmp_path):

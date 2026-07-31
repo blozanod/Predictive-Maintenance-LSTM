@@ -25,6 +25,13 @@ Three properties of the raw files shape everything below:
     is **RIGHT-CENSORED** (retired, migrated, or the record just ended) -- NOT a failure.
     Conflating the two is the classic Drive Stats analysis bug and telling them apart is
     the whole point of this milestone (RESEARCH_PLAN §4; the machinery is CHANGES.md §54).
+    Real releases bend the "always its final row" half: a handful of drives keep
+    reporting for a few days AFTER their ``failure == 1`` row (lagging reports -- e.g.
+    ``ZHZ3N9S2`` in 2024, 3 rows after its 2024-09-20 failure). The failure day still
+    ends the life being modelled, so ``_drive_records`` TRUNCATES the kept segment at
+    the first ``failure == 1`` row and ANNOUNCES every such drive (§60) -- one zombie
+    tail must not abort a fleet-scale parse, and a corpus where the flag meant a
+    persistent STATE would show up loudly as "most failed drives truncated".
   * **SMART availability is model-conditional and mostly empty.** A given model
     populates ~17-22 of the 93 attributes; every other cell is an EMPTY STRING (-> NaN).
     ``smart_187``/``smart_188`` are absent on several models and ``smart_193`` on some,
@@ -689,13 +696,14 @@ def _load_or_build_aggregate(models: list, smart_columns: list, config: Config,
 # ---------------------------------------------------------------------------
 def _check_drive(serial: str, model: str, days: np.ndarray,
                  failure: np.ndarray) -> None:
-    """Assert one drive's rows obey the documented ``failure`` semantics.
+    """Assert one drive's KEPT life obeys the documented ``failure`` semantics.
 
     A drive may appear at most ONCE per day, may carry at most ONE ``failure == 1`` row,
     and that row must be its LAST -- ``failure = 1`` means "the last day this drive was
-    operational". Rows after it would mean the flag means something else in this release,
-    so they raise rather than being trimmed away: trimming would silently discard real
-    observations on the strength of an assumption that just proved false (§7)."""
+    operational". ``_drive_records`` truncates the announced zombie tail (rows after the
+    first ``failure == 1``, a real-corpus artifact -- §60) BEFORE calling this, so these
+    checks are the invariant contract on the life actually modelled; a violation here
+    means the caller's protocol broke, and raising beats silently modelling it."""
     duplicates = days[:-1][np.diff(days) == 0]
     if duplicates.size:
         raise ValueError(
@@ -789,7 +797,7 @@ def _drive_records(payload: dict, models: list, config: Config,
         presence_days = {int(c): presence[st:st + ct, 1]
                          for c, st, ct in zip(p_codes, p_starts, p_counts)}
 
-    records, n_short, n_gap_rows = [], 0, 0
+    records, n_short, n_gap_rows, zombies = [], 0, 0, []
     for code, start, count in zip(codes, starts, counts):
         days, failure = meta[start:start + count, 1], meta[start:start + count, 2]
         serial, model = serials[code], drive_models[code]
@@ -798,22 +806,45 @@ def _drive_records(payload: dict, models: list, config: Config,
         segment_start_day = seen[_last_segment_start(seen)]
         offset = int(np.searchsorted(days, segment_start_day, side="left"))
         n_gap_rows += offset
+        # Real releases occasionally keep reporting a drive for a few days AFTER its
+        # failure=1 row (lagging reports -- observed in the real 2024 corpus, e.g.
+        # ZHZ3N9S2 with 3 rows after its 2024-09-20 failure). The failure day still ends
+        # the life being modelled, so the kept segment is TRUNCATED at the FIRST
+        # failure=1 row -- collected and ANNOUNCED below, never silent -- rather than
+        # aborting a fleet-scale parse on one zombie tail (§60). DECISION (uncited):
+        # only rows after the failure are trimmed, so no observation of the life itself
+        # is ever discarded; a tail carrying further failure=1 rows is the same lagging
+        # artifact and goes with it.
+        failed_at = np.flatnonzero(failure[offset:] == 1)
+        end = offset + int(failed_at[0]) + 1 if failed_at.size else count
+        if end < count:
+            zombies.append((serial, model,
+                            str(np.datetime64(int(days[end - 1]), "D")),
+                            str(np.datetime64(int(days[-1]), "D")), count - end))
         # The failure semantics belong to the LIFE being modelled: validating them over a
         # reused serial's whole history would hard-abort the very serial-reuse case the
         # gap rule exists to support (a failure inside a discarded earlier life is
         # dropped by that same rule).
-        _check_drive(serial, model, days[offset:], failure[offset:])
-        if count - offset < config.backblaze_min_days:
+        _check_drive(serial, model, days[offset:end], failure[offset:end])
+        if end - offset < config.backblaze_min_days:
             n_short += 1
             continue
         records.append({
             "unit": int(code) + 1, "serial": serial, "model": model,
             "model_index": model_index[model],
-            "rows": order[start + offset:start + count],
-            # The final row's flag IS the drive's fate: 1 = observed failure, 0 = the
-            # drive stopped being reported while still alive (right-censored).
-            "observed": int(failure[-1]),
+            "rows": order[start + offset:start + end],
+            # The kept life's final flag IS the drive's fate: 1 = observed failure, 0 =
+            # the drive stopped being reported while still alive (right-censored).
+            "observed": int(failure[end - 1]),
         })
+    if zombies and verbose:
+        shown = "; ".join(
+            f"{serial} ({model}): failed {fail_day}, reported through {last_day} "
+            f"(+{n_after} row(s))"
+            for serial, model, fail_day, last_day, n_after in zombies[:3])
+        print(f"[backblaze] {len(zombies)} drive(s) kept reporting AFTER their "
+              f"failure=1 day -- each truncated at its failure day (failure=1 marks the "
+              f"LAST operational day; later rows are lagging reports): {shown}")
     if not records:
         raise ValueError(
             f"no Backblaze drive reached backblaze_min_days={config.backblaze_min_days} "

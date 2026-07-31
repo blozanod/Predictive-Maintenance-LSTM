@@ -1879,6 +1879,42 @@ importing anything. Notebook-only fix, no `src/` change:
   parse (the exact session lost in this round), and a silent CPU-embedding run is
   impossible.
 
+## 60. Backblaze live run round 1: zombie drives — rows after the failure=1 day
+
+First live parse of the real 2024 corpus (all three §58 sessions) aborted with
+`ValueError: drive 'ZHZ3N9S2' (ST12000NM0008) has 3 row(s) AFTER its failure=1 row
+(2024-09-20, last observed 2024-09-23)`. **The §56 assumption "a failure=1 row is
+always a drive's last" is false in the shipped corpus**: a handful of drives keep
+reporting for a few days after their failure flag (lagging reports). `_check_drive`
+was written to refuse rather than trim precisely so this assumption would fail loud —
+it did its job; the semantics now need to absorb the observed reality without letting
+one zombie tail abort a fleet-scale parse.
+
+- **The fix (`_drive_records`).** The kept segment is TRUNCATED at its FIRST
+  `failure=1` row: the failure day still ends the life being modelled, the observed
+  failure is KEPT (rare failures are the signal), and only rows after it are trimmed —
+  no observation of the life itself is ever discarded. Every truncated drive is
+  **announced** (serial, model, failure day, last reported day, rows trimmed; count +
+  first examples), never silent — so a hypothetical corpus where `failure` meant a
+  persistent STATE would surface as "most failed drives truncated", not as quiet
+  mis-modelling. `DECISION (uncited):` a tail carrying a further `failure=1` row is the
+  same lagging artifact and goes with the trimmed tail. `observed` now reads the kept
+  life's final flag (identical to the old read for every well-formed drive).
+- **`_check_drive` keeps all three raises** (duplicate day, multiple failure rows,
+  rows-after-failure) as the fail-loud contract on the life actually modelled —
+  `_drive_records` pre-truncates, so a firing check now means the caller's protocol
+  broke. Docstrings (module bullet + both functions) updated to the split.
+- **No cache bump:** truncation happens AFTER the parsed-aggregate cache
+  (`backblaze_agg_v1_*`), whose content is unchanged — and the multi-hour 2024 parse
+  had already been cached before the old raise fired, so the re-run cache-hits and goes
+  straight to the (now-passing) per-drive protocol.
+- **Tests:** `test_rows_after_a_failure_are_truncated_and_announced` (zombie kept,
+  truncated at the failure day, announced), `test_second_failure_row_is_part_of_the_
+  zombie_tail` (end-to-end load with a first-day failure + 11-row tail; the 1-day life
+  is then dropped under `backblaze_min_days`, still announced), and the direct
+  `_check_drive` contract tests stay. Gate: `pytest -q --cov=src --cov-branch` → 100%
+  line + branch, 497 tests.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
