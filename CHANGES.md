@@ -1855,6 +1855,30 @@ the blocking step for Milestone 7's data.
 
 README updated (layout tree + the Run-on-Colab section now leads with `milestone_3/`).
 
+## 59. Milestone-3 notebooks, Colab run round 1: backbone install parity with §45
+
+First live run of the §58 notebooks failed in the MOMENT session with
+`ModuleNotFoundError: No module named 'momentfm'` — raised at the FIRST embed call,
+i.e. after the whole XJTU-SY parse had already run. **Root cause: §58 wrote one generic
+install cell (`pip install -r requirements/<model>.txt`) for all five notebooks, but the
+proven §45/§43 install lines are NOT uniform.** `requirements/moment.txt`'s own header
+says momentfm must be installed `--no-deps` (it hard-pins `numpy==1.25.2`, which has no
+py3.12 wheel — the plain resolve fails and the package is simply never installed), and
+the TTM/Moirai installs swap torch/torchvision and need a session restart before
+importing anything. Notebook-only fix, no `src/` change:
+
+- **Install cells now mirror `milestone_1/` verbatim per model:** MOMENT gets
+  `pip install --no-deps -r requirements/moment.txt`; TTM and Moirai get the §43
+  "Runtime ▸ Restart session, then re-run from the top" note (the milestone-3 clone
+  cell is re-run-safe, so re-running from the top is cheap), including the tell-tale
+  `operator torchvision::nms does not exist` symptom and its meaning.
+- **The top-up assert cell now imports the backbone itself** (`chronos` / `momentfm` /
+  `timesfm` / `tsfm_public` / `uni2ts`) next to the §48 head/baseline asserts, and
+  **asserts `torch.cuda.is_available()`** — so a botched backbone install or a
+  CUDA-less torch fails at setup in seconds instead of after a multi-minute dataset
+  parse (the exact session lost in this round), and a silent CPU-embedding run is
+  impossible.
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
