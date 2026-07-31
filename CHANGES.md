@@ -1783,6 +1783,78 @@ scikit-survival / lifelines are deliberately NOT added — the censored arm as b
 fixed-horizon binary target (IMPLEMENTATION_PLAN §6.3's own design), so no survival library
 is imported anywhere and an unused heavy dependency is worse than a missing one.
 
+## 58. Notebook reorganisation: the milestone run-surface, per-dataset results folders, and the Backblaze downloader
+
+Notebook-only change — **no `src/` line moved**, so no cache key, CSV schema, or recorded
+result is touched. Motivation: the first live Milestone-3 attempt (one `phase_b.ipynb`
+run) produced **zero artifacts**. Post-mortem on the notebook wiring found two structural
+causes rather than a code bug: (a) `phase_b.ipynb` defaulted `DRIVE` to
+`MyDrive/Predictive Maintenance LSTM` while every notebook that HAS produced results
+(§45/§47) writes to `MyDrive/pdm_tsfm` — with nothing under the former path, every
+dataset printed its skip-notice and the run ended clean and empty; (b) the run surface
+was split per dataset FAMILY (`xjtu` / `ncmapss` / `phase_b`), but the §42 constraint
+says the axis that actually partitions runtimes is the BACKBONE — a family notebook can
+only ever run one model without an environment rebuild, so "milestone 3, all five
+models" was 3 notebooks × 5 stacks = 15 hand-edited sessions waiting to go wrong.
+
+### (a) The reorganisation
+- `notebooks/campaign/` now has one folder per milestone: `milestone_1/` (the §45 Stage-A
+  ×5 + `score.ipynb`), `milestone_2/` (the §47 notebooks, folder renamed from
+  `milestone2/`), `milestone_3/` (new, below).
+- `notebooks/archive/` holds the retired family notebooks `xjtu.ipynb`, `ncmapss.ipynb`,
+  `phase_b.ipynb` verbatim (git history preserves them; the archive keeps them openable).
+  `cmapss.ipynb` stays at `notebooks/` — C-MAPSS is complete, but its gated FD001
+  deep-dives remain the only home of the ablation/transfer/raised-cap studies.
+
+### (b) `milestone_3/` — five per-model notebooks, every non-C-MAPSS dataset
+`chronos.ipynb` / `moment.ipynb` / `timesfm.ipynb` / `ttm.ipynb` / `moirai.ipynb`, one
+backbone per GPU runtime (§42), each running `run_campaign` for its ONE model over
+XJTU-SY · DS01–DS08c · DSALL · MetroPT-3 · Hydraulic · Backblaze with the recorded §12
+winner shape and `DEFAULT_DATASET_OVERRIDES` untouched. Design decisions:
+- **Per-dataset results folders.** Each dataset's campaign call runs at
+  `results_dir=results/<dataset>/` (pure notebook wiring — `experiment_name` and every
+  artifact filename are unchanged, so the `<dataset>_<model>_…` names stay
+  self-identifying and cross-model scoring globs `results/*/*_results_v2.csv`). Figures
+  land in `results/<dataset>/figures/`. The flat `results/` layout of §45/§47 is left
+  as-is — this convention applies from Milestone 3 on.
+- **A loud preflight cell** prints FOUND (with kind / censored / classification /
+  channels / alarm-horizon and the applied overrides) or MISSING per dataset before
+  anything runs — the failure mode of (a) is now visible in the first screen of output.
+- **`DECISION (uncited):` the on-runtime baseline roster** is `predict_mean · gbm · cnn ·
+  lstm · catch22_gbm`. Embedding and head-training share one runtime here, so the §48
+  precedent applies: `minirocket` (sktime + numba) is dropped — its numpy pins fight the
+  backbone stacks, and §46 recorded gbm/gbm_age as the strongest baseline in every
+  full-fleet cell. `catch22_gbm` joins as the hand-crafted-indicator foil (RQ-D).
+  Censored fleets keep the alarm sweep's own roster (`alarm_base_rate · alarm_gbm`).
+- **Top-up installs** after the backbone stack (`coral-pytorch --no-deps`, `lightgbm`,
+  `pycatch22`, `h5py`, `pyarrow`), assert-imported at setup (§48 pattern).
+- **Per-dataset fault isolation:** one `run_campaign` call per dataset inside
+  `try/except`, so a failure in one dataset (or a mid-DSALL disconnect) never kills the
+  session; a summary cell reports ok / skipped_no_data / failed per dataset.
+- **Readout cells** (guarded, read-only): full-fleet RUL snapshot per dataset, the
+  direction-aware alarm win-rule + `plot_alarm_scaling` for MetroPT-3/Backblaze, and the
+  RQ-F macro-F1 curves + `plot_taxonomy` for Hydraulic.
+- **Gated `RUN_PROBES`:** RQ-D (XJTU feature_mode) + RQ-G (DS02 aggregation) for that
+  backbone, baselines only in the chronos session (§47/§48 pattern), each session writing
+  its own `probe_<factor>_<tag>.csv` under the dataset's results folder.
+- One Drive root for everything: `DRIVE = MyDrive/pdm_tsfm` (where the §45/§47 caches and
+  results already live) with a separate `DATA_ROOT` knob defaulting to `pdm_tsfm/Data`;
+  the config cell and README warn about the retired notebooks' other default path.
+
+### (c) `notebooks/backblaze_download.ipynb`
+Stdlib-only (no pip, no GPU, no repo clone): streams the four 2024 quarterly zips from
+Backblaze's public bucket to the runtime's EPHEMERAL disk, extracts **only** the
+`YYYY-MM-DD.csv` members onto Drive under `Data/Backblaze/` (zip nesting kept — the §56
+loader globs recursively), deletes each zip before the next quarter. Restartable at
+quarter granularity (complete quarters skip; partial ones re-fetch and fill only
+missing/short files, compared by size); guards against `__MACOSX`/non-day members and
+zip-slip paths; a verify cell reports per-quarter completeness (91/91/92/92 days for
+2024) + total GB, and the space math (~40 GB for the full year) is stated up front with
+`QUARTERS` as the trim knob. Rationale: the manual download→local→Drive round-trip was
+the blocking step for Milestone 7's data.
+
+README updated (layout tree + the Run-on-Colab section now leads with `milestone_3/`).
+
 ## Not implemented (deliberately out of Phase-1 scope, Task 2.6)
 Experiment-tracking services; CLI frameworks. No result numbers, comparisons, or
 conclusions are written anywhere (Task 2.5) — recorded winners (§12) come only from
